@@ -1,0 +1,27 @@
+node_modules
+.output
+.nitro
+.tanstack
+dist
+# Every shape of it: `.env`, `.env.local`, and any one-off copy made while debugging
+# (`.env.backup-before-pooler` was a real one: a full copy of production credentials that
+# sat untracked and unignored for two days because the old rule only matched the literal
+# name). The template is the one exception; it holds no secret, only variable names.
+.env*
+!.env.example
+# Baileys credentials: linking a WhatsApp number writes real session keys here.
+.wa-auth
+# Uploaded knowledge-base files held on disk before ingest.
+uploads
+
+# Google Drive's sync scratch directories. They appear in the repo root because the folder
+# is synced, have nothing to do with the project, and would otherwise be committed by anyone
+# running `git add -A`. Both directions, only the upload half was listed here for a while,
+# which is the same oversight as the `.env*` note above in a less expensive place.
+.tmp.driveupload
+.tmp.drivedownload
+
+# Local TLS material. Nothing in this repo reads it, and an empty directory is not the state
+# to write rules for: the one that matters is the day somebody drops a private key in here
+# and the next `git add -A` commits it.
+certs

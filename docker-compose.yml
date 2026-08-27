@@ -1,0 +1,114 @@
+# Arlo Desktop.
+#
+# `docker compose up -d` is the whole install: Postgres with pgvector, its roles and schema
+# created on the first boot of a fresh volume by setup/docker-init.sh, then the app on
+# http://127.0.0.1:9005. No "paste this into the SQL editor" step; sign in with arlo / arlo.
+#
+# ⚠ THAT DEFAULT PASSWORD IS PUBLISHED IN THE README, so until it is changed in Settings
+# whoever reaches the port is fully inside: the knowledge base, every customer conversation
+# and every connected channel. It is why both ports below publish to 127.0.0.1 and nowhere
+# else. Docker's port publishing bypasses the host firewall, so changing either to
+# `9005:9005` genuinely exposes this to the network. Do that only behind something that
+# asks who you are.
+#
+# Compose reads .env from this directory, which is where the passwords live. They are
+# gitignored and are not shared with any other deployment.
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      # The superuser, used only to run the init script above. The app never connects as it.
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set POSTGRES_SUPERUSER_PASSWORD in .env}
+      POSTGRES_DB: arlo
+      # Read by setup/docker-init.sh, which substitutes them into 00-roles.sql. Keep them
+      # alphanumeric: the script seds them in, and a `/` or a quote would break it.
+      ARLO_OWNER_PASSWORD: ${ARLO_OWNER_PASSWORD:?set ARLO_OWNER_PASSWORD in .env}
+      ARLO_APP_PASSWORD: ${ARLO_APP_PASSWORD:?set ARLO_APP_PASSWORD in .env}
+    ports:
+      # Bound to loopback deliberately. `54322:5432` would publish the database to every
+      # machine on the network, and Docker's port publishing bypasses the host firewall.
+      - '127.0.0.1:54322:5432'
+    volumes:
+      - arlo-db:/var/lib/postgresql/data
+      # The .sql is read by the init script from here. It is deliberately NOT mounted into
+      # /docker-entrypoint-initdb.d: see the comment in setup/docker-init.sh.
+      - ./setup:/opt/arlo-setup:ro
+      - ./setup/docker-init.sh:/docker-entrypoint-initdb.d/00-arlo-roles.sh:ro
+    healthcheck:
+      # What the app waits on. Without it the app starts first, finds nothing listening and
+      # exits before Postgres has finished its first-boot initialisation.
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d arlo']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # `db` is the compose network name, and 5432 is the port inside it, not the 54322
+      # published on the host. The app connects as the NOBYPASSRLS role; the owner runs
+      # migrations and nothing else. See setup/00-roles.sql.
+      DATABASE_URL: postgresql://arlo_app:${ARLO_APP_PASSWORD:?set ARLO_APP_PASSWORD in .env}@db:5432/arlo
+      DATABASE_URL_OWNER: postgresql://arlo_owner:${ARLO_OWNER_PASSWORD:?set ARLO_OWNER_PASSWORD in .env}@db:5432/arlo
+      DATABASE_SCHEMA: arlo
+      # What the browser actually types. The widget snippet, Telegram webhook addresses and
+      # OAuth redirects are all built from this, so a wrong value is not cosmetic.
+      PUBLIC_URL: ${PUBLIC_URL:-http://127.0.0.1:9005}
+      # Telegram, fetched rather than pushed.
+      #
+      # The default above is loopback, which Telegram's servers cannot reach by definition:
+      # `setWebhook` answers "Failed to resolve host" and the bot cannot be connected at all.
+      # Polling is the other direction: this container calls Telegram and holds the
+      # connection open, so it needs no inbound address, no certificate and no forwarded
+      # port. It is what makes Telegram work on a laptop and behind any NAT.
+      #
+      # Override it to empty if you have given PUBLIC_URL a real public address and would
+      # rather have the webhook.
+      TELEGRAM_POLLING: ${TELEGRAM_POLLING:-1}
+      # One worker: prod.mjs clusters for a server answering many people at once, which is
+      # not what this is. Raise it if you are running Arlo for a team.
+      WEB_WORKERS: 1
+      # The only chat provider this build talks to. Optional here because Settings can save
+      # it later, until one exists the bot declines and hands every question to a person
+      # rather than inventing an answer.
+      AUTOBRICKS_API_KEY: ${AUTOBRICKS_API_KEY:-}
+      AUTOBRICKS_MODEL: ${AUTOBRICKS_MODEL:-}
+      EMBEDDINGS_URL: ${EMBEDDINGS_URL:-}
+      EMBEDDINGS_KEY: ${EMBEDDINGS_KEY:-}
+      EMBEDDINGS_MODEL: ${EMBEDDINGS_MODEL:-}
+      BRAVE_SEARCH_KEY: ${BRAVE_SEARCH_KEY:-}
+      SCRAPE_ALLOW_HOSTS: ${SCRAPE_ALLOW_HOSTS:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      OUTLOOK_CLIENT_ID: ${OUTLOOK_CLIENT_ID:-}
+      OUTLOOK_CLIENT_SECRET: ${OUTLOOK_CLIENT_SECRET:-}
+      POLL_SECONDS: ${POLL_SECONDS:-60}
+      OCR_LANGS: ${OCR_LANGS:-eng}
+      # Encrypts connector tokens at rest. Do NOT rotate casually: every secret already
+      # stored reads as absent afterwards, and mailboxes and bots stop working at once.
+      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env - see .env.example}
+    ports:
+      # Loopback, for the reason at the top of this file.
+      - '127.0.0.1:9005:9005'
+    volumes:
+      # Linking a WhatsApp number writes real session keys. Losing them means scanning the
+      # QR again, so they outlive the container.
+      - arlo-wa:/app/.wa-auth
+      # Tesseract downloads ~15MB of language data the first time it reads a scanned PDF.
+      - arlo-cache:/app/.cache
+      # Read-write, and the only bind mount here: saving an Autobricks key in Settings writes
+      # it back so it survives `docker compose down -v`. Nothing else in the app writes to it.
+      # Remove this line and the key is kept in the database alone: still encrypted, still
+      # working, gone with the volume.
+      - ./.env:/app/.env
+    restart: unless-stopped
+
+volumes:
+  arlo-db:
+  arlo-wa:
+  arlo-cache:

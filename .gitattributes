@@ -1,0 +1,38 @@
+# Line endings, and why this file is not just about the deploy scripts.
+#
+# Everything here is committed with LF. What varies is the *checkout*: Git for Windows
+# defaults to core.autocrlf=true, so a clone there writes CRLF into the working tree. That
+# is harmless while the files are only read by editors, and it is not what happens to this
+# project: the working tree gets copied to another machine, or mounted into a Linux
+# container, and then a carriage return is a character in a value rather than a line ending.
+#
+# Two ways it has actually broken:
+#
+#   `.env` written from a CRLF `.env.example` gives Compose ARLO_OWNER_PASSWORD=secret\r.
+#   docker-init.sh seds that into 00-roles.sql, so the role is created with a password
+#   ending in a carriage return, and the app connects without one. The error is
+#   `password authentication failed for user "arlo_owner"`, which says nothing about
+#   line endings and sends you looking at passwords that are, in fact, correct.
+#
+#   `grep '^SECRET_KEY=$'` in scripts/setup.sh does not match `SECRET_KEY=\r`, so the key
+#   is silently skipped. Setup reports "Generated 3 secret(s)" instead of 4 and the failure
+#   surfaces later, as a Compose interpolation error about a missing variable.
+#
+# So: LF in the working tree on every platform. Editors have handled that for years, and it
+# is the only setting under which copying this folder somewhere is safe.
+* text=auto eol=lf
+
+# Belt and braces for the files where a stray CR is worst: read by /bin/sh, by Postgres,
+# or by Compose's dotenv parser rather than by a program that tolerates either.
+*.sh          text eol=lf
+*.sql         text eol=lf
+*.yml         text eol=lf
+Dockerfile    text eol=lf
+.env.example  text eol=lf
+
+# Not text. Left alone so nothing rewrites bytes inside them.
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary

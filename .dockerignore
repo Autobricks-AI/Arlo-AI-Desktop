@@ -1,0 +1,23 @@
+# What must not reach the build context.
+#
+# Secrets first: .env in every shape, and the WhatsApp session keys. The image is built from
+# this directory, so anything here can end up in a layer, and a layer is not something you
+# can take a file back out of afterwards.
+.env*
+!.env.example
+.wa-auth
+
+# Rebuilt inside the image. Copying host node_modules in would ship whatever platform the
+# host happens to be, which on Windows means binaries Alpine cannot run.
+node_modules
+dist
+.output
+.nitro
+.tanstack
+
+# Nothing the build needs, and the largest thing in the tree.
+.git
+uploads
+.tmp.driveupload
+.tmp.drivedownload
+certs
