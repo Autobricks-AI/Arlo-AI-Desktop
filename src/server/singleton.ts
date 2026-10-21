@@ -30,6 +30,25 @@ import { rawClient } from './db.ts'
  */
 export const ownsSingletons = !cluster.isWorker
 
+/**
+ * Whether this process actually holds the cross-process lock, as opposed to merely not being
+ * a forked worker.
+ *
+ * `ownsSingletons` above answers the narrower question and is true in dev, in tests, in a
+ * one-off script and in *every* primary — including one that asked for the live lock and lost.
+ * A losing primary skips `resume()` and the poller, but its workers still RPC singleton calls
+ * to it, and a send that finds no socket would open one from `creds.json` on disk: a second
+ * Baileys session for a number another process already holds, which WhatsApp closes both ends
+ * of. `live()` is what tells those paths apart.
+ *
+ * Three states, not two, and the third is the point: a process that never *asked* for the lock
+ * — a one-off script, a test, anything not booting through `src/server.ts` — has no claim to
+ * refuse anything. Only a process that asked and lost knows another one holds the socket. So
+ * unasked reads as permitted, which is what every caller assumed before this existed.
+ */
+let claim: 'unasked' | 'held' | 'lost' = 'unasked'
+export const live = () => claim !== 'lost'
+
 /** ARLO in hex — see `tryOwnLiveSingletons()`. Any constant would do; this one is legible in `pg_locks`. */
 const LIVE_SINGLETONS_KEY = 0x41726c6f
 
@@ -64,14 +83,38 @@ let owner: Awaited<ReturnType<typeof rawClient>> | null = null
  */
 export async function tryOwnLiveSingletons(): Promise<boolean> {
   const client = await rawClient()
-  const { rows } = await client.query<{ got: boolean }>('select pg_try_advisory_lock($1) as got', [
-    LIVE_SINGLETONS_KEY,
-  ])
+  let rows: { got: boolean }[]
+  try {
+    ;({ rows } = await client.query<{ got: boolean }>('select pg_try_advisory_lock($1) as got', [
+      LIVE_SINGLETONS_KEY,
+    ]))
+  } catch (e) {
+    /*
+     * A query that throws used to leak the connection and take boot down with it — the client
+     * was released on the losing path and on no other, so a transient failure here left a
+     * pooled connection checked out forever and the process never started. Answering false is
+     * the safe direction: this process serves requests and starts no singleton, which is
+     * exactly what a process that lost the lock does.
+     */
+    client.release()
+    console.error('[singleton] could not ask for the live lock:', e instanceof Error ? e.message : e)
+    if (!owner) claim = 'lost'
+    return false
+  }
+
   if (rows[0]?.got) {
     owner = client // held forever on purpose — releasing this connection is what frees the lock
+    claim = 'held'
     return true
   }
   client.release()
+  /*
+   * Only if we are not already the holder. Asking twice from one process loses the second
+   * race against our own first connection, and that is not this process losing the lock — it
+   * still holds it, on `owner`. Clobbering the flag there would make the holder refuse its own
+   * sends.
+   */
+  if (!owner) claim = 'lost'
   return false
 }
 
@@ -90,6 +133,8 @@ export function releaseLiveSingletons(): Promise<void> {
   if (!owner) return Promise.resolve()
   const client = owner
   owner = null
+  // Back to unasked, not lost: releasing is a test tearing down, not another process winning.
+  claim = 'unasked'
   return new Promise((resolve) => {
     client.once('end', () => resolve())
     client.release(true) // destroy rather than return to the pool — this is what frees the lock

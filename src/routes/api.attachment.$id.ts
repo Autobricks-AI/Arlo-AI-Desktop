@@ -38,12 +38,22 @@ export const Route = createFileRoute('/api/attachment/$id')({
             'content-type': mime,
             'content-disposition': `${INLINE.test(mime) ? 'inline' : 'attachment'}; filename="${name}"`,
             /*
-             * Never sniff, never frame, never cache in a shared cache. This is somebody
-             * else's document served from our origin: a mislabelled HTML file rendering as
-             * a page here would be a cross-site scripting hole with a session behind it.
+             * Never sniff, never cache in a shared cache, and framed only by us. This is
+             * somebody else's document served from our origin: a mislabelled HTML file
+             * rendering as a page here would be a cross-site scripting hole with a session
+             * behind it.
              */
             'x-content-type-options': 'nosniff',
-            'content-security-policy': "default-src 'none'; sandbox",
+            /*
+             * `sandbox` is what makes this safe to show: the file is inert, whatever it
+             * claims to be. `frame-ancestors 'self'` then lets our own pages put it in an
+             * iframe -- which is the only way to look at a PDF without leaving the queue --
+             * while still refusing every other origin. The global rule is 'none', and the
+             * x-frame-options beside it has to be relaxed in step or the older header wins
+             * and Firefox refuses the frame on its own.
+             */
+            'content-security-policy': "default-src 'none'; sandbox; frame-ancestors 'self'",
+            'x-frame-options': 'SAMEORIGIN',
             'cache-control': 'private, max-age=300',
           },
         })

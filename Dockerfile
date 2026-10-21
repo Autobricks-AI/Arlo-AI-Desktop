@@ -30,11 +30,13 @@ COPY --from=build /app/dist ./dist
 COPY server ./server
 COPY migrations ./migrations
 
-# Both are volumes in docker-compose.yml. Created here so they exist and belong to `node`
-# even when nothing is mounted over them: a first run that cannot write its WhatsApp
-# session directory fails at the point somebody is scanning a QR code, which is a
-# confusing place to find out about file permissions.
-RUN mkdir -p /app/.wa-auth /app/.cache && chown -R node:node /app/.wa-auth /app/.cache
+# All three are volumes in docker-compose.yml. Created here so they exist and belong to
+# `node` even when nothing is mounted over them: a named volume takes its ownership from the
+# image's directory at first use, and one mounted over a root-owned path is a directory the
+# unprivileged user below cannot write to. A first run that cannot write its WhatsApp session
+# directory fails at the point somebody is scanning a QR code, which is a confusing place to
+# find out about file permissions.
+RUN mkdir -p /app/.wa-auth /app/.cache /app/.media && chown -R node:node /app/.wa-auth /app/.cache /app/.media
 
 # Not root. Nothing here needs to be, and the app takes uploads from strangers.
 USER node

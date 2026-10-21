@@ -29,6 +29,13 @@ export type Connection = { channel: ChannelId; ref: string; label: string; taken
  * Greying it out would make them go and un-tick a box on another page first.
  */
 export async function options(workspaceId: number, forBotId?: number) {
+  /*
+   * Read once and used twice below -- for the list itself and for the ids its file checklist
+   * is built from. It used to be fetched a second time just to pull the ids out, and the
+   * grouping it does is not free, so the page paid for the whole thing twice and discarded one.
+   */
+  const deployed = forBotId ? await lessons.deployed(workspaceId, forBotId) : []
+
   const spoken = await bots.taken(workspaceId)
   const owner = (channel: string, ref: string) => {
     const found = spoken.find((s) => s.channel === channel && s.connection_ref === ref)
@@ -89,26 +96,38 @@ export async function options(workspaceId: number, forBotId?: number) {
     calendars: await catalogue.calendars(workspaceId),
 
     /*
-     * Per bot, unlike everything above it.
+     * Counts for the tabs, and what the bot has already been taught. Not the queue itself.
      *
-     * An answer is written for *this* bot, in the words its own customers should be given —
-     * a support bot's phrasing is not a sales bot's. Empty in the wizard, where there is no
-     * bot yet to have been taught anything.
+     * Per bot, unlike everything above it: a lesson is approved for *this* bot, in the words
+     * its own customers should be given, and a support bot's phrasing is not a sales bot's.
+     * Both are empty in the wizard, where there is no bot yet to have been taught anything.
+     *
+     * The queue is fetched a page at a time when the review door opens rather than coming
+     * down with the loader -- on a bot with several hundred proposals it was almost the whole
+     * payload, re-sent after every approval.
      */
-    examples: forBotId ? await lessons.examples(workspaceId, forBotId) : [],
+    lessons: { counts: forBotId ? await lessons.queueCounts(workspaceId, forBotId) : {}, deployed },
+
+    /**
+     * Where this bot files what it learns.
+     *
+     * The page points at the base rather than reprinting what is in it: a hundred learned
+     * facts is a knowledge base, and the place to read, edit or delete one is the knowledge
+     * base — not a settings tab showing a copy that cannot be edited. Null until the first
+     * fact is approved, because the base is made on demand.
+     */
+    learnedBase: forBotId ? await lessons.learnedBaseOf(workspaceId, forBotId) : null,
 
     /*
-     * Which files go out with which answer.
+     * Which files go out with which approved example.
      *
-     * One query for the whole set rather than one per row: the editor draws a checklist
-     * against every answer at once, and asking per row is how a page with twenty of them
+     * One query for the whole set rather than one per example: the editor draws a checklist
+     * against every example at once, and asking per row is how a page with twenty of them
      * makes twenty round trips to render.
      */
-    exampleResources: forBotId
-      ? await lessons.resourcesFor(
-          workspaceId,
-          (await lessons.examples(workspaceId, forBotId)).map((e) => e.id),
-        )
-      : [],
+    lessonResources: await lessons.resourcesFor(
+      workspaceId,
+      deployed.filter((l) => l.kind === 'example').map((l) => l.id),
+    ),
   }
 }

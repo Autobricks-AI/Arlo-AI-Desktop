@@ -3,6 +3,7 @@ import { createServerFn, useServerFn } from '@tanstack/react-start'
 import { useState } from 'react'
 import { requireSession } from '../server/auth'
 import * as bots from '../server/bot'
+import * as lessons from '../server/lessons'
 import { identityState, setCompanyIdentity, useDerived } from '../server/identity'
 import { CompanyIdentity } from '../components/CompanyIdentity'
 
@@ -11,6 +12,8 @@ const load = createServerFn({ method: 'GET' }).handler(async () => {
   return {
     bots: await bots.list(s.workspaceId),
     identity: await identityState(s.workspaceId),
+    // What each one has learned and nobody has looked at yet.
+    waiting: Object.fromEntries((await lessons.pendingCounts(s.workspaceId)).map((r) => [r.bot_id, r.n])),
   }
 })
 
@@ -35,7 +38,7 @@ const drop = createServerFn({ method: 'POST' })
 export const Route = createFileRoute('/chatbots')({ loader: () => load(), component: Gallery })
 
 function Gallery() {
-  const { bots: list, identity } = Route.useLoaderData()
+  const { bots: list, identity, waiting } = Route.useLoaderData()
   const router = useRouter()
   const defaultFn = useServerFn(setDefault)
   const dropFn = useServerFn(drop)
@@ -115,6 +118,19 @@ function Gallery() {
                   {bot.name}
                 </Link>
                 <span className="row" style={{ gap: 6 }}>
+                  {/* Waiting on somebody, so it belongs next to the state rather than
+                      buried on the bot's own page. */}
+                  {waiting[bot.id] > 0 && (
+                    <Link
+                      className="pill warn"
+                      to="/chatbot/$id"
+                      params={{ id: String(bot.id) }}
+                      search={{ tab: 'training' }}
+                      title="Answers and facts waiting for you"
+                    >
+                      {waiting[bot.id]} to review
+                    </Link>
+                  )}
                   <span className={bot.mode === 'live' ? 'pill ok' : bot.mode === 'learning' ? 'pill warn' : 'pill'}>
                     {bot.mode}
                   </span>

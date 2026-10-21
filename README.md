@@ -24,6 +24,7 @@ team is running on it, and takes the operations off you.
 | Scanned PDFs, read with OCR | ✓ | ✓ |
 | Keyword search, with no API key at all | ✓ | ✓ |
 | Vector search, with an embeddings key | ✓ | ✓ |
+| Find which passage a sentence came from, and which pages you corrected by hand | ✓ | ✓ |
 | Graph RAG: reaches passages that share no words with the question | – | ✓ |
 | **Channels** | | |
 | Web widget | ✓ | ✓ |
@@ -36,14 +37,19 @@ team is running on it, and takes the operations off you.
 | Guardrails you write | ✓ | ✓ |
 | Guardrails suggested from your knowledge base | – | ✓ |
 | Modes: live, learning, paused | ✓ | ✓ |
+| Playground: talk to a bot yourself, with no customer on the other end | ✓ | ✓ |
+| Let it answer one conversation while it stays paused everywhere else | ✓ | ✓ |
 | Draft mode: the bot writes, a person edits and sends | – | ✓ |
 | **Teaching it** | | |
-| Write the answer to a question yourself, and the files it sends with it | ✓ | ✓ |
+| Reads finished conversations and proposes what it learned, for you to approve | ✓ | ✓ |
+| Correct an approved answer, and choose the files that go out with it | ✓ | ✓ |
+| Files approved facts into a knowledge base of their own, and cites them | ✓ | ✓ |
 | Learns customer details from what the customer said | ✓ | ✓ |
-| Learns from your team's replies, automatically | – | ✓ |
+| Proposes dates, prices and files it saw, not only wording | ✓ | ✓ |
 | **Inbox and contacts** | | |
 | Every channel in one thread list | ✓ | ✓ |
 | Take over, reply as yourself, hand back | ✓ | ✓ |
+| Send a file with a reply, and see the pictures customers send | ✓ | ✓ |
 | Contact cards, one person across every channel | ✓ | ✓ |
 | Price list and business calendar the bot can quote | ✓ | ✓ |
 | **Sales** | | |
@@ -57,6 +63,7 @@ team is running on it, and takes the operations off you.
 | Your own Autobricks key | ✓ | ✓ |
 | Arlo's shared model, billed to us | – | ✓ |
 | Hosted: backups, and a WhatsApp session somebody else keeps alive | – | ✓ |
+| Files kept out of the database, so Postgres stays a database | on disk | in object storage |
 | Everything stored on your own machine, in a container you control | ✓ | – |
 
 ---
@@ -96,6 +103,12 @@ docker compose down          # stop it; your data stays
 
 First boot builds the image, so give it a minute before the page answers. Drop the `-d` to
 watch that happen in the terminal instead, then Ctrl-C does stop it.
+
+`down` keeps everything. **`down -v` does not** -- it deletes the volumes, and your answers
+live in two of them: the database, and the file store that uploads and sent files are moved
+into so Postgres does not have to hold them. A file that has been moved has no second copy
+in the database, by design, so `-v` is the one command here that loses work. It is in the
+troubleshooting section below because a first boot that never came up has nothing to lose.
 
 That is the whole install. `setup` writes a `.env` with four freshly generated secrets in
 it (three database passwords and the key that encrypts everything else), so there is

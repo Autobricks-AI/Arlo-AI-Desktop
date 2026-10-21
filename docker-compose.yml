@@ -89,6 +89,15 @@ services:
       OUTLOOK_CLIENT_SECRET: ${OUTLOOK_CLIENT_SECRET:-}
       POLL_SECONDS: ${POLL_SECONDS:-60}
       OCR_LANGS: ${OCR_LANGS:-eng}
+      # Where files go when they leave Postgres. Named here rather than defaulted in the code,
+      # because a store is only correct relative to the database that owns it -- a process that
+      # guesses one from its working directory can move files somewhere this deployment cannot
+      # read, and the write will look like it worked.
+      #
+      # Not overridable from .env, deliberately: this path and the arlo-media volume below are
+      # one decision, and a variable that moves the store without moving the volume is the bug
+      # this is here to prevent. To put the files somewhere else, change both.
+      MEDIA_DIR: /app/.media
       # Encrypts connector tokens at rest. Do NOT rotate casually: every secret already
       # stored reads as absent afterwards, and mailboxes and bots stop working at once.
       SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env - see .env.example}
@@ -101,6 +110,11 @@ services:
       - arlo-wa:/app/.wa-auth
       # Tesseract downloads ~15MB of language data the first time it reads a scanned PDF.
       - arlo-cache:/app/.cache
+      # Uploads, sent files and their previews, moved out of Postgres a few per minute so the
+      # database stays a database. This volume is not optional: the row's copy of the bytes is
+      # deleted once the file is written here, so a store that did not outlive the container
+      # would turn `docker compose down` into data loss. See src/server/storage.ts.
+      - arlo-media:/app/.media
       # Read-write, and the only bind mount here: saving an Autobricks key in Settings writes
       # it back so it survives `docker compose down -v`. Nothing else in the app writes to it.
       # Remove this line and the key is kept in the database alone: still encrypted, still
@@ -112,3 +126,4 @@ volumes:
   arlo-db:
   arlo-wa:
   arlo-cache:
+  arlo-media:

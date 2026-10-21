@@ -33,6 +33,17 @@ alter role arlo_owner nocreatedb nocreaterole;
 -- 2. pgvector. Creating an extension needs more rights than the migration runner has.
 create extension if not exists vector;
 
+-- 2b. pg_trgm, for the contacts search.
+--
+--     Same reason it is here rather than in a migration: creating an extension needs rights
+--     the migration runner does not have, and CREATE EXTENSION is not safe to race -- the test
+--     suite runs a process per file and thirty of them attempting it at once is a deadlock.
+--
+--     It backs the trigram index in 065_paging.sql, which is what lets the contacts box keep
+--     matching substrings (a phone fragment, part of an address) now that the search runs in
+--     SQL instead of in the browser. Without it that migration fails loudly, which is correct.
+create extension if not exists pg_trgm;
+
 -- 3. Our own schema, owned by the role that will create the tables in it.
 --
 -- `authorization arlo_owner` needs SET ROLE on it, and the automatic membership a new role

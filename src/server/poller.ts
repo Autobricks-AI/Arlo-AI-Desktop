@@ -15,9 +15,18 @@ import { purgeExpiredSessions } from './auth.ts'
 import { sweep as sweepCrawls } from './sites.ts'
 import { sweep as sweepUploads } from './uploads.ts'
 import { sweepEmbeddings } from './embed.ts'
-import { sweep as sweepCustomerFacts } from './lessons.ts'
+import { sweep as sweepLessons, sweepGroups } from './lessons.ts'
+import { sweepMedia } from './media.ts'
+import { sweepThumbs } from './resources.ts'
 
-const SECONDS = Number(process.env.POLL_SECONDS ?? 60)
+/*
+ * Guarded, because `Number()` answers NaN for anything that is not a number and
+ * `setInterval(fn, NaN)` is `setInterval(fn, 0)` — a tick every millisecond, each one running
+ * a model call per row. A typo in the environment should slow nothing down and stop nothing;
+ * it falls back to the default, and a zero or a negative still means "no poller" as before.
+ */
+const CONFIGURED = Number(process.env.POLL_SECONDS ?? 60)
+const SECONDS = Number.isFinite(CONFIGURED) ? CONFIGURED : 60
 
 /**
  * On globalThis so a dev hot-reload cannot start a second timer — two of these would
@@ -55,12 +64,39 @@ async function tick() {
     // Whatever was stored while there was no embeddings key. Cheap, and it stops a
     // half-embedded corpus retrieving worse than an unembedded one.
     await sweepEmbeddings()
+    /*
+     * Files out of the database and into the store, a few per tick, and previews made for
+     * the ones that can have them. Both no-op with nowhere to put bytes, so an install that
+     * has not configured a store keeps its files in Postgres exactly as before.
+     *
+     * A few per tick rather than all of them because this is the only sweep that moves
+     * megabytes: a workspace catching up on a year of attachments should do it over an
+     * afternoon, not hold the interval open while it reads the whole table into memory.
+     */
+    await sweepMedia()
+    await sweepThumbs()
     // Expiry is enforced on read, so this is only housekeeping — it stops the table growing
     // by one row for every sign-in nobody ever signed out of.
     await purgeExpiredSessions()
-    // Reads quiet threads for what the customer said about themselves. Last, because it is
-    // the only sweep here that can spend a model call per row.
-    await sweepCustomerFacts()
+    /*
+     * Reads finished conversations for what the team answered and what the customer said
+     * about themselves. Near the end, because it is the only sweep here that can spend a
+     * model call per row -- and after sweepEmbeddings() above, so a lesson stored while there
+     * was no key has a vector before anything tries to match it.
+     */
+    await sweepLessons()
+
+    /*
+     * Straight after the harvest, which is what makes the queue look right rather than nearly
+     * right: the sweep above is what creates the proposals, so working out what they repeat
+     * in the same tick means a new near-duplicate arrives already folded under the row that
+     * said it first.
+     *
+     * Cheap and offline -- it compares text with pg_trgm's similarity() rather than
+     * embeddings, so it needs no key and costs no network. The expensive half of this fold
+     * used to run on the chatbot page instead, twice per load.
+     */
+    await sweepGroups()
   } catch (e) {
     console.error('[poller] sweep failed:', e instanceof Error ? e.message : e)
   } finally {

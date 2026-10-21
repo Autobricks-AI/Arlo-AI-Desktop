@@ -32,7 +32,7 @@ import { identify } from '../customers.ts'
 import { adoptBot, datePlacedFromMessages, markImported, open as openThread, record, removeConnection } from '../conversations.ts'
 import { routeTo } from '../bot.ts'
 import { add as attachFile } from '../attachments.ts'
-import { ownsSingletons, singleton } from '../singleton.ts'
+import { live as holdsLiveLock, ownsSingletons, singleton } from '../singleton.ts'
 import { handle as ask } from '../agent.ts'
 import { MAX_BYTES } from '../attachments.ts'
 import type { Incoming as File } from '../attachments.ts'
@@ -271,6 +271,20 @@ export function linkedIds(workspaceId: number): string[] | null {
 // ---------------------------------------------------------------- the socket
 
 /** Idempotent — calling this while a socket is up or opening does nothing. */
+/**
+ * What to do when a start nobody awaited fails.
+ *
+ * All three callers below fire `start()` and walk away — a scheduled reconnect, a resume at
+ * boot, and the one behind `add()`. `start()` rejects synchronously when `meta.json` is gone,
+ * which the resume path can hit on its own: it gates on `creds.json` existing, and a folder
+ * with credentials but a torn or missing `meta.json` is what a partial delete or a crash
+ * mid-write leaves behind. Unawaited, that rejection is an unhandledRejection, and Node's
+ * default is to kill the process — the *primary*, which holds every workspace's socket and
+ * every advisory-lock singleton. One unlinked number would have taken the lot down.
+ */
+const whyStartFailed = (accountId: string) => (e: unknown) =>
+  console.error(`[whatsapp] could not start ${accountId}:`, e instanceof Error ? e.message : e)
+
 export function start(accountId: string): Promise<void> {
   /*
    * An account that does not exist is not one to open a socket for.
@@ -337,7 +351,23 @@ async function open(accountId: string) {
   /** A socket we have already replaced must not write over its successor's state. */
   const current = () => runtime(accountId).sock === sock
 
-  sock.ev.on('creds.update', saveCreds)
+  /*
+   * Serialised, and guarded by `current()` like every other handler on this socket.
+   *
+   * `saveCreds` rewrites files under the account's directory, and Baileys emits `creds.update`
+   * in bursts during a handshake — two overlapping writes can interleave and leave a
+   * `creds.json` that parses as nothing, which is a linked number that silently stops working
+   * and can only be fixed by scanning again. Chaining onto the previous save makes them run in
+   * order at the cost of nothing; without `current()` a socket already replaced would write
+   * over its successor's state, which is the same reason every handler below has it.
+   */
+  let saving: Promise<void> = Promise.resolve()
+  sock.ev.on('creds.update', () => {
+    if (!current()) return
+    saving = saving
+      .then(() => saveCreds())
+      .catch((e) => console.error(`[whatsapp] could not save credentials for ${accountId}:`, e instanceof Error ? e.message : e))
+  })
   sock.ev.on('connection.update', (u: any) => current() && void onConnection(accountId, u))
   /*
    * The backfill, in chunks, newest first.
@@ -437,7 +467,7 @@ export async function onConnection(accountId: string, u: any) {
       return
     }
     const wait = Math.min(30_000, 2 ** l.attempts * 500)
-    l.retry = setTimeout(() => void start(accountId), wait)
+    l.retry = setTimeout(() => void start(accountId).catch(whyStartFailed(accountId)), wait)
     l.retry.unref?.()
   }
 }
@@ -877,19 +907,36 @@ const sendImpl = async (
     if (!fs.existsSync(file(accountId, 'creds.json')))
       throw new Error('That WhatsApp number is not connected. Scan the code again to reconnect it.')
 
+    /*
+     * Only the process holding the live lock may open a socket from credentials on disk.
+     *
+     * `ownsSingletons` is true in every primary, including one that asked for the cross-process
+     * lock and lost — and a losing primary still serves its workers' singleton RPCs. Without
+     * this, a send arriving there found no socket, saw `creds.json`, and opened a second
+     * Baileys session for a number the winning process already holds. WhatsApp resolves that
+     * by closing both, which is the conflict the lock exists to prevent, reached from the one
+     * direction the lock does not itself cover.
+     */
+    if (!holdsLiveLock())
+      throw new Error('That WhatsApp number is held by another process on this database. Try again shortly.')
+
     await start(accountId)
     if (!runtime(accountId).sock) throw new Error('That WhatsApp number is not connected')
   }
-  const sent = await runtime(accountId).sock.sendMessage(jid, { text })
+  // Only when something was typed: a file sent on its own arrives on its own, rather than
+  // under a message repeating the name the attachment already carries.
+  const sent = text ? await runtime(accountId).sock.sendMessage(jid, { text }) : null
 
   /*
    * The text first, then the files, and each one on its own.
    *
-   * The id that comes back is the text message's — that is what the redelivery guard and the
-   * `external_id` stamp are for, and a caption-bearing document would move it. Each upload is
-   * caught on its own because the answer is the message and the file is an enclosure: losing
-   * the enclosure and keeping the answer beats losing both.
+   * The id that comes back is the text message's where there is one and the first file's
+   * where there is not — that is what the redelivery guard and the `external_id` stamp are
+   * for, and a files-only send is still a delivered one. Each upload is caught on its own
+   * because the answer is the message and the file is an enclosure: losing the enclosure and
+   * keeping the answer beats losing both.
    */
+  let id: string | null = sent?.key?.id ?? null
   for (const f of files) {
     try {
       // asSystem, because the primary has no request and no workspace scope, and byToken is
@@ -897,17 +944,18 @@ const sendImpl = async (
       const held = await asSystem(() => byToken(f.token))
       if (!held?.bytes) continue
       const mime = f.mime ?? 'application/octet-stream'
-      await runtime(accountId).sock.sendMessage(
+      const up = await runtime(accountId).sock.sendMessage(
         jid,
         mime.startsWith('image/')
           ? { image: held.bytes, mimetype: mime }
           : { document: held.bytes, mimetype: mime, fileName: f.title },
       )
+      id ??= up?.key?.id ?? null
     } catch (e) {
       console.error('[whatsapp] could not send', f.title, e instanceof Error ? e.message : e)
     }
   }
-  return `whatsapp:${jid}:${sent?.key?.id ?? ''}`
+  return id == null ? null : `whatsapp:${jid}:${id}`
 }
 
 // ---------------------------------------------------------------- managing links
@@ -916,7 +964,7 @@ const addImpl = async (workspaceId: number, label: string): Promise<Account> => 
   const accountId = crypto.randomBytes(4).toString('hex')
   writeMeta(accountId, { label: label.trim() || 'WhatsApp', phone: null, workspace_id: workspaceId, created_at: now() })
   // Opened immediately so the QR exists by the time the page asks for it.
-  void start(accountId)
+  void start(accountId).catch(whyStartFailed(accountId))
   return get(workspaceId, accountId)!
 }
 
@@ -973,7 +1021,7 @@ const sendVia = singleton('wa.send', sendImpl)
 export function resume() {
   if (!ownsSingletons) return
   for (const accountId of ids()) {
-    if (fs.existsSync(file(accountId, 'creds.json'))) void start(accountId)
+    if (fs.existsSync(file(accountId, 'creds.json'))) void start(accountId).catch(whyStartFailed(accountId))
     // Nothing to reconnect to, so whatever the state file last said is from before this
     // process existed — a QR code left there would be offered forever and never work.
     else mark(accountId, { status: 'off', qr: null })
@@ -1022,17 +1070,24 @@ export async function importHistory(accountId: string, messages: any[]): Promise
   }
 
   /*
-   * Marked as backfill, and marked as already read.
+   * Marked as backfill, and marked as already read for training.
    *
    * `imported_at` is what tells the inbox these were not live traffic and what a bulk "read
-   * these for training" acts on. The other two stamps are what keep the import quiet: both
-   * sweeps ask whether anything has happened since they last looked, so a thread whose newest
-   * message is older than the stamp is not due. Without them, importing a few hundred chats
-   * would spend a model call on each of them twice over — once for training, once for the
-   * board — and produce a review queue nobody could face.
+   * these for training" acts on. `harvested_at` is what keeps the import quiet: the training
+   * sweep asks whether anything has happened since it last looked, so a thread whose newest
+   * message is older than the stamp is not due. Without it, importing a few hundred chats
+   * would spend a model call on every one of them and produce a review queue nobody could
+   * face — and what the bot should learn from a year of chats is a decision, not a default.
    *
-   * A live message on one of these threads still makes it due, because that moves `last_at`
-   * past the stamp. Which is right: the backfill is old, the new message is not.
+   * The board is the other way round, and that is the change here. `judged_at` used to be
+   * stamped alongside it, which meant linking a phone imported six hundred conversations,
+   * created six hundred contacts, and left the sales board empty — the qualify sweep was
+   * told they had all already been judged. Where somebody got to is exactly what you want to
+   * know about the chats that were on the phone before Arlo arrived, so they are enrolled
+   * below and left due. The sweep reads them twenty at a time, at its own pace.
+   *
+   * A live message on one of these threads still makes it due for both, because that moves
+   * `last_at` past the stamp. Which is right: the backfill is old, the new message is not.
    */
   if (touched.size)
     await withWorkspace({ workspaceId: meta.workspace_id }, async () => {

@@ -14,9 +14,10 @@
  */
 import { all, insert, one, run, tx } from './db.ts'
 import * as bases from './bases.ts'
+import * as conversations from './conversations.ts'
 import type { Example } from './lessons.ts'
 import * as resources from './resources.ts'
-import { BOT_DEFAULTS, BOT_MODES, CHANNEL_IDS, TOOL_IDS } from '../types.ts'
+import { BOT_DEFAULTS, BOT_MODES, CHANNEL_IDS, TOOL_IDS, WORKSPACE_TZ, nowFor } from '../types.ts'
 import type { BotMode, ChannelId, ToolId } from '../types.ts'
 
 export type Bot = {
@@ -196,7 +197,7 @@ const text = (v: string | undefined, fallback: string, max: number) => (v ?? fal
  * exists but has no instructions is a bot that could answer a customer badly in the gap.
  */
 export async function create(workspaceId: number, patch: Patch): Promise<Bot> {
-  return tx(async () => {
+  const bot = await tx(async () => {
     const first = !(await one(`SELECT 1 FROM bots WHERE workspace_id = ?`, workspaceId))
     const id = await insert(
       `INSERT INTO bots (workspace_id, name, is_default) VALUES (?,?,?)`,
@@ -223,6 +224,10 @@ export async function create(workspaceId: number, patch: Patch): Promise<Bot> {
       ...patch,
     })
   })
+  // A bot made with a connection already on it inherits that connection's past threads, the
+  // same as one given the connection afterwards.
+  await catchUp(workspaceId, patch)
+  return bot
 }
 
 /**
@@ -243,9 +248,52 @@ export async function save(workspaceId: number, botId: number, patch: Patch): Pr
    * Unawaited on purpose — see handOverBacklog's own comment for why.
    */
   if (before.mode !== 'live' && bot.mode === 'live')
-    void import('./agent.ts').then((agent) => agent.handOverBacklog(workspaceId, botId))
+    void import('./agent.ts')
+      .then((agent) => agent.handOverBacklog(workspaceId, botId))
+      /*
+       * Caught, because an unawaited promise that rejects is an unhandledRejection, and Node's
+       * default for that is to kill the process — so a backlog hand-over failing would take
+       * down the server that was only asked to change a bot's mode. It also lost the reason,
+       * which is how this surfaced: a pool ended underneath it at the end of a test run
+       * produced a failure naming neither this call nor the bot it was for.
+       *
+       * Logged and dropped is the right trade here and nowhere else in this file: the mode
+       * change has already committed, the hand-over is a convenience over doing it by hand,
+       * and refusing to save a bot because its backlog could not be caught up would be worse.
+       */
+      .catch((e) => console.error(`[bot] backlog hand-over failed for bot ${botId}:`, e instanceof Error ? e.message : e))
+
+  await catchUp(workspaceId, patch)
 
   return bot
+}
+
+/**
+ * Taking on a connection, or a board, takes on what already arrived on it.
+ *
+ * The ordinary order of setting Arlo up is: link the number, let WhatsApp hand over the
+ * chats that were on the phone, then point a chatbot at it. Everything imported in step two
+ * was filed before this bot existed, so those threads have no `bot_id` — and everything
+ * downstream joins on that column. `lessons.sweep()` could not read them and `sweepQualify`
+ * could not see them, so a phone with six hundred chats on it produced six hundred contacts
+ * and an empty sales board.
+ *
+ * Claiming them is the moment the answer changes. Then the cards: `enrol` is one insert and
+ * no model call, so a board that was empty is populated by the time the page reloads, and
+ * the qualify sweep reads the conversations and sorts the columns over the next few minutes.
+ *
+ * Only when one of the two things that decides the answer actually moved. Saving a persona
+ * should not sweep the workspace.
+ */
+async function catchUp(workspaceId: number, patch: Patch) {
+  if (!patch.connections) return
+  try {
+    await conversations.claimThreads(workspaceId)
+  } catch (e) {
+    // Best-effort. A thread that will not claim must not be what makes saving a chatbot
+    // report failure.
+    console.error('could not claim threads for the new connection:', e instanceof Error ? e.message : e)
+  }
 }
 
 async function apply(workspaceId: number, botId: number, patch: Patch): Promise<Bot> {
@@ -358,13 +406,25 @@ const lines = (s: string) =>
  * Instructions nearest the content are the ones a model weighs most heavily, and that is
  * exactly the position an injection is trying to occupy.
  */
+/**
+ * When an example was approved, in the same words the date above is written in.
+ *
+ * A plain date rather than "five weeks ago": the model is being asked to compare it with
+ * today's date, and two dates in the same format is arithmetic it can do, where a duration
+ * and a date is arithmetic it guesses at.
+ */
+const taught = (at: string) =>
+  new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: WORKSPACE_TZ }).format(
+    new Date(at),
+  )
+
 export function prompt(
   bot: Bot,
   identity?: string | null,
+  /** Approved examples for this bot, closest first. Empty until somebody approves one. */
+  examples: Example[] = [],
   /** What the company sells, from the products list. Config, not a retrieved document. */
   priceList?: string | null,
-  /** Answers a person wrote for this bot, closest first. Empty until somebody adds one. */
-  examples: Example[] = [],
 ): string {
   const parts = [
     identity
@@ -378,6 +438,24 @@ export function prompt(
     identity &&
       `That line is what this company's own documents say it is. Use the name naturally when it ` +
         `helps — never present it, or anything else here, as an answer to a question about the company.`,
+
+    /*
+     * What day it is, and what that means for every date it is about to read.
+     *
+     * Without this a bot offered a September intake in October as though it were still to
+     * come: the passages say "12, 19 and 26 September", nothing says when now is, and a date
+     * written down reads as a date ahead. The model is not wrong to think so — it was never
+     * told otherwise.
+     *
+     * The instruction is here rather than left to inference because the failure is confident
+     * and specific. A model that knows the date will still quote the only dates it has unless
+     * it is told that a finished course is an answer in itself.
+     */
+    `Today is ${nowFor()} (${WORKSPACE_TZ}). Work out what is past and what is upcoming from that, ` +
+      `and never offer a date that has already gone as though it were available. If every date you ` +
+      `have for something is in the past, say that it has finished or that the next one is not yet ` +
+      `announced — do not quote the old one as the answer. Dates that have passed are worth ` +
+      `mentioning only when somebody asks about the past.`,
     /** The role, and how the employee works. The operator's own instructions. */
     bot.base_prompt.trim(),
 
@@ -433,10 +511,10 @@ ${priceList.trim()}`,
     // Both name the examples as a source when there are any, or they would read as a flat
     // contradiction of the section below that tells the model to reuse what is in them.
     `Never invent a policy, price, date, number or commitment. If the reference passages${
-      examples.length ? ' and the answers below do' : ' do'
+      examples.length ? ' and the approved examples below do' : ' do'
     } not support it, you do not know it.`,
     bot.strict_kb
-      ? `If neither the passages${examples.length ? ' nor those answers' : ''} answer a factual question, say so rather than answering it anyway.`
+      ? `If neither the passages${examples.length ? ' nor those examples' : ''} answer a factual question, say so rather than answering it anyway.`
       : `If the passages do not answer a factual question you may draw on general knowledge, but say plainly that it is not from the company's own material.`,
 
     lines(bot.escalate).length &&
@@ -452,32 +530,66 @@ ${priceList.trim()}`,
     bot.persona.trim() && `House style, from the people who run this company:\n${bot.persona.trim()}`,
 
     /*
-     * Answers a person wrote for this bot, and they outrank the passages.
+     * How the team has actually answered questions like this one.
      *
-     * A deliberate reversal, and it earns it: somebody sat down and typed this as the answer
-     * they want given, which is a more current and more considered thing than a brochure
-     * crawled off the website a year ago. Where the two disagree, the typed one is what the
-     * company means today.
+     * Approved by a person, which is the only reason they are here at all -- these come out of
+     * real conversations with strangers, and an unreviewed one is a stranger writing part of
+     * this prompt.
+     *
+     * And they outrank the passages, which is a deliberate reversal. These used to be
+     * phrasing-only -- follow the tone, take no facts -- on the reasoning that a price in a
+     * six-month-old example is a stale price. What that produced was a bot that had been shown
+     * the shop link its team gives out every day and answered "you can buy through our
+     * official website or a distributor near you", out of a brochure nobody had opened in a
+     * year. An approved example is the most current thing in this prompt. Where it and a
+     * document disagree, it wins -- except on dates, which the block below reverses again.
      */
     examples.length &&
-      `Answers your team has written for questions like this one. Follow the wording, the length and
-the shape of them, and treat what they say as current — where one of these and a reference passage
-disagree, this is right and the passage is out of date. Reuse the specifics: the links, the
-addresses, the prices, the names.
+      `How your team has answered questions like this before. Follow the tone, the length and the
+shape of these — and treat what they say as current. A person here gave these answers to real
+customers and approved them afterwards, so where an example and a reference passage disagree, the
+example is right and the passage is out of date. Reuse the specifics in them: the links, the
+addresses, the prices. Not the names -- an example was written to one person and is being shown
+to you while you answer somebody else.
 
-When one lists files, those files are attached to your reply for you. Write the sentence that goes
-with them — "here is our price list" — and do not paste an address.
+Dates are the exception, and they run the other way. Each example says when it was written: an
+answer that called something "upcoming" was describing what was upcoming on the day it was
+written, not today. Check every date in an example against today's date above, and if it has
+passed then that example is describing something that is over — repeating it would send a
+customer to a class that has already run.
+
+A square-bracketed phrase inside an example — "[the dates on the schedule]", "[the current fee
+from the price list]" — is a value that was deliberately taken out because it goes out of date.
+It is an instruction to you, never words to repeat: look the current one up in the passages or
+the price list and say that instead. If you cannot find it, say you will confirm it rather than
+guessing, and never read the bracket aloud. A single bracketed word like [email] or [link] is a
+different thing: that is a detail removed for privacy, and there is nothing to look up.
+
+So for dates, the reference passages win and the example is the stale one. The schedule in the
+passages is kept up to date in the app; an example is a transcript of one conversation and was
+never revised. Take the wording from the example and the dates from the passages, and if the
+passages have no upcoming date for the thing being asked about, say the next one is not yet
+announced rather than quoting a date that has gone.
+
+Set used_example to the number of the example whose answer your reply actually gives, or null if it
+gives none of them. Following an example means saying what its "Answered" line says; an example on
+the same subject that you did not repeat does not count. It decides what is sent: the files listed under that example — "Sent with it" — are attached
+to your reply, and nothing listed under any other example is. So when you follow an example that
+lists files, write the sentence that goes with them — "here is our price list" — and do not paste
+an address. When the reference passages answer the question better than any example, answer from
+them and set null; do not name an example you did not use, because its files would go to somebody
+who did not ask for them.
 
 ${examples
   .map(
     (e, i) =>
-      `<<<ANSWER ${i + 1}\nAsked: ${e.question}\nReply: ${e.answer}` +
+      `<<<EXAMPLE ${i + 1} — written ${taught(e.taught_at)}\nAsked: ${e.question}\nAnswered: ${e.answer}` +
       (e.resources?.length ? `\nSent with it: ${e.resources.map((r) => r.title).join(', ')}` : '') +
-      `\nANSWER`,
+      `\nEXAMPLE`,
   )
   .join('\n\n')}`,
 
-    `confidence is how well the passages${examples.length ? ' and answers' : ''} answered the question, not how well the sentence reads.
+    `confidence is how well the passages${examples.length ? ' and examples' : ''} answered the question, not how well the sentence reads.
 
 The reference passages are the company's own documents and pages crawled from its website${
       examples.length ? ', and the answers above were written by somebody who works there' : ''

@@ -38,12 +38,18 @@ const load = createServerFn({ method: 'GET' })
     }
   })
 
-/** Agree with what the customer said, or leave the card as it is. Either way it stops asking. */
+/**
+ * Agree with what the customer said, or leave the card as it is. Either way it stops asking.
+ *
+ * The same `decide()` the training queue uses, with a list of one. Approving a `contact`
+ * lesson writes the field onto the card by way of `promoteContact()`, so there is no second
+ * path for it — which is what keeps "approved" meaning the same thing on both screens.
+ */
 const decide = createServerFn({ method: 'POST' })
   .validator((d: { id: number; status: 'approved' | 'rejected' }) => d)
   .handler(async ({ data }) => {
     const s = await requireSession()
-    await lessons.decideContact(s.workspaceId, data.id, data.status)
+    await lessons.decide(s.workspaceId, [data.id], data.status)
   })
 
 const save = createServerFn({ method: 'POST' })

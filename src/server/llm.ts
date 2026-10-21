@@ -20,9 +20,9 @@
  * inventing one. A key that *is* set and fails does throw — that is a real problem with a
  * real key, and swallowing it would silently degrade every answer with nobody noticing.
  *
- * **Embeddings do not come through here.** `embed.ts` has its own endpoint and key, because
- * Autobricks serves no `/v1/embeddings` yet. That is the one call this file's promise does
- * not cover, and it is written down in embed.ts too.
+ * **Embeddings do not come through here.** `embed.ts` has its own endpoint and key, so it is
+ * the one call configured per install rather than per workspace. That is the one call this
+ * file's promise does not cover, and it is written down in embed.ts too.
  */
 import type { ZodType } from 'zod'
 import * as z from 'zod'
@@ -147,13 +147,34 @@ export const available = async (workspaceId: number) => !!(await resolveProvider
  *
  * Free text rather than a union, on purpose: a new caller should be able to log without
  * touching this file, and an unfamiliar value is still better than the null it replaces.
- * The ones in use are `answer`, `tool_round`, `harvest`, `qualify`, `identity`, `graph`,
- * `catalogue`, `summary`.
+ * The ones in use are `answer`, `tool_round`, `chat`, `learned`, `generalised`, `catalogue`
+ * and `identity`.
  *
  * `conversationId` is what makes an answer addable up. Answering one message is several
  * calls — the tool rounds and then the answer — so the useful unit of cost is a thread.
  */
 export type Spend = { purpose: string; conversationId?: number | null }
+
+/**
+ * What the provider says a call used, and what it charged for it.
+ *
+ * `cost` is the model's own cost in USD, passed through from upstream. `credits_used` is what
+ * was actually debited, and it is a different number -- the provider applies its own margin and
+ * bills whole credits with a per-request minimum, so a short call costs the minimum however
+ * little of it was used. Only the provider knows those terms, which is why this takes the
+ * figure rather than working it out from a rate kept here.
+ *
+ * Both are kept because the gap between them is real and worth seeing. Both are optional: a
+ * provider that reports neither leaves those columns null, and the page says the charge was
+ * not recorded rather than showing a zero somebody would add up.
+ */
+type Usage = {
+  prompt_tokens?: number
+  completion_tokens?: number
+  total_tokens?: number
+  cost?: number
+  credits_used?: number
+}
 
 /**
  * One row per call. Never lets a logging failure fail the answer it is logging — the call
@@ -163,32 +184,68 @@ export type Spend = { purpose: string; conversationId?: number | null }
 async function recordUsage(
   workspaceId: number,
   provider: string,
-  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number },
+  usage?: Usage,
   about?: Spend,
   model?: string,
 ) {
   if (!usage) return
   await asSystem(() =>
     run(
-      `INSERT INTO llm_usage (workspace_id, provider, prompt_tokens, completion_tokens, total_tokens, purpose, conversation_id, model)
-       VALUES (?,?,?,?,?,?,?,?)`,
+      `INSERT INTO llm_usage (workspace_id, provider, prompt_tokens, completion_tokens, total_tokens, purpose, conversation_id, model, cost_usd, credits)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
       workspaceId,
       provider,
       usage.prompt_tokens ?? 0,
       usage.completion_tokens ?? 0,
       usage.total_tokens ?? 0,
       about?.purpose ?? null,
-      about?.conversationId ?? null,
+      /*
+       * `||`, not `??`. The column is a foreign key, so a caller with no real conversation --
+       * the playground, which answers against a synthetic id of 0 -- would fail the insert, and
+       * the catch below would swallow it. A call that costs tokens and records nothing is the
+       * one outcome this function exists to prevent.
+       */
+      about?.conversationId || null,
       model ?? null,
+      /*
+       * Null rather than 0 where the provider says nothing. Zero is a call that cost nothing;
+       * null is a call we were never told the cost of, and the page has to tell those apart
+       * rather than count an unknown as free.
+       */
+      usage.cost ?? null,
+      usage.credits_used ?? null,
     ),
   ).catch((e) => console.error('[llm] could not record usage:', e instanceof Error ? e.message : e))
 }
 
 export type ToolCall = { id: string; name: string; arguments: string }
 
+/**
+ * One piece of a message that is not only words.
+ *
+ * The OpenAI-compatible shape every provider here speaks: a `content` array instead of a
+ * string, with each part declaring what it is. Only the two kinds anything sends today —
+ * there is no reason to model audio or video until something produces one.
+ *
+ * An image is a `data:` URL rather than a link, because the only images we have are bytes
+ * somebody just pasted: they are not public, and a URL the provider cannot fetch is worse
+ * than no image at all.
+ */
+export type Part = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
+
 export type Message = {
   role: 'system' | 'user' | 'assistant' | 'tool'
-  content: string
+  /**
+   * Words, or words and pictures.
+   *
+   * A plain string for all but one caller, which is why it stays the simple case: the array
+   * form goes out verbatim in the request body, so nothing between here and the provider had
+   * to learn about it.
+   *
+   * Whether the model can *read* a picture is the model's business and nothing here knows it.
+   * A text-only model answers an image with a provider error, which the caller shows.
+   */
+  content: string | Part[]
   /** Set on an assistant turn that asked for tools; echoed back so the model sees its own. */
   tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string } }[]
   /** Set on a tool turn: which call this is the result of. */
@@ -224,7 +281,7 @@ type Json = {
       tool_calls?: { id: string; function?: { name?: string; arguments?: string } }[]
     }
   }[]
-  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
+  usage?: Usage
 }
 
 /**
@@ -342,7 +399,20 @@ export async function structured<T>(
   workspaceId: number,
   schema: ZodType<T>,
   messages: Message[],
-  { name = 'result', maxTokens = 2048, timeoutMs = 90_000, model = null as string | null, purpose = '', conversationId = null as number | null } = {},
+  {
+    name = 'result',
+    maxTokens = 2048,
+    timeoutMs = 90_000,
+    model = null as string | null,
+    purpose = '',
+    conversationId = null as number | null,
+    /*
+     * Only where a caller wants one. Left out, the provider's own default applies, which is
+     * what every caller before this one was measured against. A yes/no check wants 0: it is a
+     * judgement that should come out the same way twice, not a sentence that should vary.
+     */
+    temperature = undefined as number | undefined,
+  } = {},
 ): Promise<T | null> {
   const json = z.toJSONSchema(schema, { io: 'output' }) as Record<string, unknown>
   delete json.$schema
@@ -352,6 +422,7 @@ export async function structured<T>(
     {
       messages,
       max_tokens: maxTokens,
+      ...(temperature === undefined ? {} : { temperature }),
       response_format: { type: 'json_schema', json_schema: { name, strict: true, schema: strictify(json) } },
     },
     timeoutMs,
@@ -360,7 +431,22 @@ export async function structured<T>(
   )
   if (!content) return null
 
-  const parsed = schema.safeParse(JSON.parse(content.trim()) as unknown)
+  /*
+   * Parsed inside the guard, not outside it. `safeParse` catches a shape that does not match,
+   * but `JSON.parse` throws before it is ever reached — and this function documents a null
+   * return for a bad response, so a provider answering with prose or a truncated body escaped
+   * as an exception into whichever caller happened to be asking. In the agent path that is a
+   * webhook handler, where a throw is a retry storm rather than an error message.
+   */
+  let body: unknown
+  try {
+    body = JSON.parse(content.trim())
+  } catch {
+    console.error('[llm] response was not JSON:', content.trim().slice(0, 200))
+    return null
+  }
+
+  const parsed = schema.safeParse(body)
   if (!parsed.success) {
     console.error('[llm] response did not match the schema:', parsed.error.message.slice(0, 300))
     return null
@@ -368,13 +454,26 @@ export async function structured<T>(
   return parsed.data
 }
 
+/**
+ * The two money columns every report below carries.
+ *
+ * Null when no row in the group had a figure recorded -- `sum()` over nothing is null -- which
+ * the page shows as not recorded rather than as a zero.
+ *
+ * Cast so they arrive as numbers. `pg` returns unconstrained `numeric` as a *string*, to keep
+ * a precision JavaScript cannot hold, and a string that looks like a number is the kind of
+ * thing that quietly adds up as concatenation. The precision matters in the column, not in a
+ * total being rounded to cents for display.
+ */
+type Money = { cost_usd: number | null; credits: number | null }
+
 /** Total tokens spent so far, per provider, and when each was last used. The whole report. */
 export const usage = (workspaceId: number) =>
-  // `prompt` rides along so the page can price input and output apart. Output is four
-  // times dearer and this app's spend is ~90% input, so a single blended rate would
-  // overstate the bill several times over.
-  all<{ provider: string; tokens: number; prompt: number; last_at: string }>(
+  // `prompt` is the input share of `tokens`, which is most of it: this app reads far more
+  // than it writes.
+  all<{ provider: string; tokens: number; prompt: number; last_at: string } & Money>(
     `SELECT provider, sum(total_tokens)::int AS tokens, sum(prompt_tokens)::int AS prompt,
+            sum(cost_usd)::float8 AS cost_usd, sum(credits)::int AS credits,
             max(created_at) AS last_at
        FROM llm_usage WHERE workspace_id = ? GROUP BY provider ORDER BY last_at DESC`,
     workspaceId,
@@ -403,11 +502,13 @@ export const usage = (workspaceId: number) =>
  * query, however many models a workspace has tried.
  */
 export const byModel = (workspaceId: number, sinceDays = 30) =>
-  all<{ model: string; calls: number; tokens: number; prompt: number; purposes: string }>(
+  all<{ model: string; calls: number; tokens: number; prompt: number; purposes: string } & Money>(
     `SELECT COALESCE(model, 'unrecorded')        AS model,
             count(*)::int                        AS calls,
             sum(total_tokens)::int               AS tokens,
             sum(prompt_tokens)::int              AS prompt,
+            sum(cost_usd)::float8                AS cost_usd,
+            sum(credits)::int                    AS credits,
             string_agg(DISTINCT COALESCE(purpose, 'other'), ', ' ORDER BY COALESCE(purpose, 'other')) AS purposes
        FROM llm_usage
       WHERE workspace_id = ? AND created_at > now() - make_interval(days => ?)
@@ -433,10 +534,12 @@ export const byModel = (workspaceId: number, sinceDays = 30) =>
  * share that does not total the workspace's bill is explained rather than puzzling.
  */
 export const byBot = (workspaceId: number, sinceDays = 30) =>
-  all<{ bot_id: number | null; name: string | null; calls: number; tokens: number; prompt: number }>(
+  all<{ bot_id: number | null; name: string | null; calls: number; tokens: number; prompt: number } & Money>(
     `SELECT c.bot_id, b.name, count(*)::int AS calls,
             sum(u.total_tokens)::int  AS tokens,
-            sum(u.prompt_tokens)::int AS prompt
+            sum(u.prompt_tokens)::int AS prompt,
+            sum(u.cost_usd)::float8   AS cost_usd,
+            sum(u.credits)::int       AS credits
        FROM llm_usage u
        JOIN conversations c ON c.id = u.conversation_id
        LEFT JOIN bots b     ON b.id = c.bot_id
@@ -447,11 +550,13 @@ export const byBot = (workspaceId: number, sinceDays = 30) =>
   )
 
 export const spend = (workspaceId: number, sinceDays = 30) =>
-  all<{ purpose: string; calls: number; tokens: number; prompt: number; per_call: number }>(
+  all<{ purpose: string; calls: number; tokens: number; prompt: number; per_call: number } & Money>(
     `SELECT COALESCE(purpose, 'unrecorded') AS purpose,
             count(*)::int                   AS calls,
             sum(total_tokens)::int          AS tokens,
             sum(prompt_tokens)::int         AS prompt,
+            sum(cost_usd)::float8           AS cost_usd,
+            sum(credits)::int               AS credits,
             round(avg(total_tokens))::int   AS per_call
        FROM llm_usage
       WHERE workspace_id = ? AND created_at > now() - make_interval(days => ?)

@@ -1,0 +1,37 @@
+-- When the customer last wrote, which is the only clock WhatsApp's 24-hour window runs on.
+--
+-- ---------------------------------------------------------------- the question
+--
+-- Some channels carry a free reply only for a window after the customer's last message, and
+-- refuse anything else once it closes. Arlo knew this only after a send had already failed --
+-- the connector turns the provider's refusal code into a sentence, and
+-- by then `deliver()` has already written the message into the transcript marked
+-- "not delivered". The inbox gave no sign beforehand, so a thread that could still be
+-- answered looked exactly like one that could not.
+--
+-- `conversations.last_at` cannot answer it. `record()` advances it on every message in either
+-- direction, so a thread we replied to five minutes ago reads as five minutes old however
+-- long it has been since the customer wrote -- which is the common case, because our reply is
+-- what moved it.
+--
+-- ---------------------------------------------------------------- still no window column
+--
+-- The argument against one holds, and it is the provider's clock that settles it: the provider
+-- enforces the window, the provider's clock decides it, and that clock counts messages which
+-- never reached us. A column here would be a second opinion that is sometimes wrong in the
+-- direction that silently refuses a send which would have worked.
+--
+-- That holds, and nothing here changes it. The inbox only ever *shows* this; Send is never
+-- disabled, and a thread Arlo thinks is cold is still sent to, and still fails with the
+-- provider's own refusal if the provider disagrees. What makes showing it honest is that Arlo
+-- files both halves of a conversation: a connector that reports only inbound messages cannot
+-- answer "when did the customer last write", because it never saw the replies in between.
+--
+-- So: no column, no trigger, no second opinion that can refuse anything. The fact is derived
+-- where it is read, with `max(created_at) ... where direction = 'in'`, and this index is what
+-- makes that a lookup rather than a scan of the thread. Partial, because the inbound half is
+-- the only half anybody asks this about, and a partial index over roughly half the rows is
+-- half the index.
+
+create index if not exists messages_inbound on messages (conversation_id, created_at desc)
+  where direction = 'in';

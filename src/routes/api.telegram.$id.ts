@@ -25,6 +25,18 @@ export const Route = createFileRoute('/api/telegram/$id')({
 
         try {
           const result = await handle(params.id, request.headers.get('x-telegram-bot-api-secret-token'), update)
+
+          if (result.status === 'deferred')
+            return new Response(JSON.stringify({ ok: false, ...result }), {
+              status: 429,
+              headers: {
+                'content-type': 'application/json',
+                // From the limiter, not a constant: a hardcoded number either retries into the
+                // same refusal or waits far longer than the window has left.
+                'retry-after': String(Math.max(1, Math.ceil(result.retryAfterMs / 1000))),
+              },
+            })
+
           return Response.json({ ok: true, ...result })
         } catch (e) {
           console.error('[telegram] webhook failed:', e instanceof Error ? e.message : e)

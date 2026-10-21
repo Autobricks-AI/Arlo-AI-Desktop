@@ -309,6 +309,68 @@ export const isUniqueViolation = (e: unknown) => (e as { code?: string })?.code 
 // ---------------------------------------------------------------- migrations
 
 /**
+ * Refuse to run against a database this build did not build.
+ *
+ * Arlo brings its own database. Where you point it is your business -- the container in
+ * docker-compose.yml, Postgres on your NAS, a managed instance you pay for -- but it has to be
+ * *yours*. The case this exists for is a connection string copied out of the wrong .env: a
+ * build that ships a different schema starts applying its migrations to a database somebody
+ * else's install is using, and neither side can tell until something is already broken.
+ *
+ * The test needs no configuration and no list of known hosts:
+ *
+ *     every migration already applied must be one this build ships
+ *
+ * Which resolves by itself in all three states. A database with nothing applied is a first
+ * boot and proceeds. A database this build made has only names it ships and proceeds. One
+ * built by a different install presents a ledger full of filenames this build has never heard
+ * of, and that is not a judgement call -- it is arithmetic on two lists.
+ *
+ * Deliberately not a version comparison and not a whitelist of hostnames. A version check
+ * needs somewhere to write the version, which is the database we are refusing to touch; a
+ * hostname check would refuse the NAS and wave through anything reached down a tunnel.
+ * The migration ledger is already there, already authoritative about which build wrote this
+ * schema, and already read at boot.
+ *
+ * Reads one table and writes nothing, so a refusal leaves the database exactly as it was.
+ */
+export async function assertOwnDatabase(dir = 'migrations') {
+  const client = await ownerPool().connect()
+  try {
+    await client.query(`set search_path to ${schema()}, public`)
+
+    /*
+     * to_regclass rather than catching the error: a missing table here is the ordinary first
+     * boot, and `migrate()` is about to create it. Only a *populated* ledger can disagree
+     * with us.
+     */
+    const present = await client.query<{ ok: boolean }>(`select to_regclass('schema_migrations') is not null as ok`)
+    if (!present.rows[0]?.ok) return
+
+    const applied = (await client.query<{ name: string }>(`select name from schema_migrations order by name`)).rows.map(
+      (r) => r.name,
+    )
+    if (!applied.length) return
+
+    const ours = new Set(fs.readdirSync(dir).filter((f) => f.endsWith('.sql')))
+    const strangers = applied.filter((name) => !ours.has(name))
+    if (!strangers.length) return
+
+    const shown = strangers.slice(0, 5).join(', ')
+    const more = strangers.length > 5 ? `, and ${strangers.length - 5} more` : ''
+    throw new Error(
+      `This database was built by a different Arlo than this one, so nothing has been read or written.\n\n` +
+        `  ${strangers.length} of its ${applied.length} applied migrations are files this build does not ship: ${shown}${more}.\n` +
+        `  This build ships ${ours.size}, starting at ${[...ours].sort()[0]}.\n\n` +
+        `Point DATABASE_URL and DATABASE_URL_OWNER at this install's own database -- ` +
+        `docker-compose.yml starts one -- or, if this database is the right one, you are running the wrong build against it.`,
+    )
+  } finally {
+    client.release()
+  }
+}
+
+/**
  * Apply every migration that has not run yet, in filename order.
  *
  * Runs as the owner, because it creates the tables whose policies the app then cannot

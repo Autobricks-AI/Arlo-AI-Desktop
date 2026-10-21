@@ -82,6 +82,17 @@ export const PROVIDERS: Provider[] = [...EMAIL_IDS]
 /** How many messages one sweep looks at, per mailbox. A ceiling on a minute of new mail. */
 const PER_SWEEP = 20
 
+/**
+ * How many list pages one sweep will walk looking for messages it has not filed.
+ *
+ * ponytail: a bound rather than a watermark. Ten pages of PER_SWEEP is two hundred messages
+ * looked at per mailbox per tick, which drains a year of history in a few hours of ticks and
+ * costs nothing on a mailbox that is up to date, where the first page is enough. The upgrade
+ * path, if a backlog is ever large enough to matter, is a per-mailbox cursor rather than a
+ * higher number here.
+ */
+const MAX_PAGES = 10
+
 type Spec = {
   authorize: string
   token: string
@@ -544,18 +555,36 @@ async function sweepOne(mailbox: { id: string; workspace_id: number; provider: P
           // Gmail's query language takes whole days only, so the precise floor is applied
           // again below — this just keeps the list request small.
           const q = `in:inbox after:${Math.floor(since.getTime() / 1000)}`
-          const listed = await fetchJson(
-            `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=${PER_SWEEP}&q=${encodeURIComponent(q)}`,
-            token,
-          )
           const out: Incoming[] = []
-          for (const stub of listed.messages ?? []) {
-            if (await alreadyFiled(mailbox.workspace_id, `gmail:${stub.id}`)) continue
-            const full = await fetchJson(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${stub.id}?format=full`, token)
-            const parsed = parseGmail(full)
-            if (!parsed) continue
-            parsed.attachments = await gmailAttachments(full, stub.id, token)
-            out.push(parsed)
+          let page: string | undefined
+          /*
+           * Paged until PER_SWEEP messages nobody has filed are found, rather than taking the
+           * newest PER_SWEEP and stopping.
+           *
+           * `since` is a floor somebody set and it never moves, so one page of the newest
+           * twenty was all a mailbox could ever reach: after the first sweep filed them, every
+           * later sweep listed the same twenty, skipped all twenty as already filed, and
+           * returned nothing. A mailbox with a year of history behind that floor reported a
+           * clean last_sync forever and imported none of it. Walking the pages is what makes
+           * the sweep after this one see something new.
+           */
+          for (let i = 0; i < MAX_PAGES && out.length < PER_SWEEP; i++) {
+            const listed = await fetchJson(
+              `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=${PER_SWEEP}&q=${encodeURIComponent(q)}` +
+                (page ? `&pageToken=${encodeURIComponent(page)}` : ''),
+              token,
+            )
+            for (const stub of listed.messages ?? []) {
+              if (out.length >= PER_SWEEP) break
+              if (await alreadyFiled(mailbox.workspace_id, `gmail:${stub.id}`)) continue
+              const full = await fetchJson(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${stub.id}?format=full`, token)
+              const parsed = parseGmail(full)
+              if (!parsed) continue
+              parsed.attachments = await gmailAttachments(full, stub.id, token)
+              out.push(parsed)
+            }
+            page = listed.nextPageToken
+            if (!page) break
           }
           return out
         })()
@@ -564,18 +593,22 @@ async function sweepOne(mailbox: { id: string; workspace_id: number; provider: P
           // internetMessageHeaders and internetMessageId are only returned when named.
           const select =
             'id,conversationId,internetMessageId,internetMessageHeaders,from,sender,subject,body,bodyPreview,receivedDateTime,hasAttachments'
-          const listed = await fetchJson(
-            `https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=${PER_SWEEP}&$select=${select}` +
-              `&$orderby=receivedDateTime desc&$filter=${encodeURIComponent(filter)}`,
-            token,
-          )
           const out: Incoming[] = []
-          for (const m of listed.value ?? []) {
-            if (await alreadyFiled(mailbox.workspace_id, `outlook:${m.id}`)) continue
-            const parsed = parseGraph(m)
-            if (!parsed) continue
-            if (m.hasAttachments) parsed.attachments = await graphAttachments(m.id, token)
-            out.push(parsed)
+          // Same paging, and for the same reason — see the Gmail branch above.
+          let next: string | undefined =
+            `https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=${PER_SWEEP}&$select=${select}` +
+            `&$orderby=receivedDateTime desc&$filter=${encodeURIComponent(filter)}`
+          for (let i = 0; i < MAX_PAGES && next && out.length < PER_SWEEP; i++) {
+            const listed = await fetchJson(next, token)
+            for (const m of listed.value ?? []) {
+              if (out.length >= PER_SWEEP) break
+              if (await alreadyFiled(mailbox.workspace_id, `outlook:${m.id}`)) continue
+              const parsed = parseGraph(m)
+              if (!parsed) continue
+              if (m.hasAttachments) parsed.attachments = await graphAttachments(m.id, token)
+              out.push(parsed)
+            }
+            next = listed['@odata.nextLink']
           }
           return out
         })()

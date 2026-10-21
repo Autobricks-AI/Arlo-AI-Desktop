@@ -179,16 +179,35 @@ export const availability = (id: ToolId) => REGISTRY[id].unavailable()
  * called. Hiding it would leave the model with no way to say "I could not look that up" —
  * it would simply answer as though the question had no answer.
  */
-export function definitions(ids: ToolId[]) {
+export function definitions(ids: ToolId[], sendable: string[] = []) {
   return ids.map((id) => {
     const json = z.toJSONSchema(REGISTRY[id].schema, { io: 'output' }) as Record<string, unknown>
     delete json.$schema
     return {
       type: 'function' as const,
-      function: { name: id, description: `${TOOLS[id].name}. ${REGISTRY[id].instruction}`, parameters: json },
+      function: { name: id, description: `${TOOLS[id].name}. ${REGISTRY[id].instruction}${named(id, sendable)}`, parameters: json },
     }
   })
 }
+
+/**
+ * The list send_resource has always claimed the model was given.
+ *
+ * It was not. The instruction read "from the list you have been given" and no list was
+ * anywhere -- not in the system prompt, not in the tool, nowhere. A model that cannot name a
+ * file will not call a tool that wants its exact title, so it did the next best thing and
+ * wrote the filename into the sentence instead: "Here is the brochure: Spring_Brochure_v7.pdf",
+ * with no file attached and nothing for the customer to open.
+ *
+ * On the tool rather than in the prompt because the tool is where the model is deciding, and
+ * because a bot without send_resource granted should not pay for the titles on every turn.
+ */
+const named = (id: ToolId, sendable: string[]) =>
+  id !== 'send_resource'
+    ? ''
+    : sendable.length
+      ? ` The ones available on this conversation, by exact title: ${sendable.join('; ')}.`
+      : ' There are none available on this conversation, so do not offer a file or name one.'
 
 /**
  * Run one call the model asked for.

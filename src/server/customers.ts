@@ -10,7 +10,7 @@
  * they happen to be using.
  */
 import { all, insert, one, run } from './db.ts'
-import { DATE_KINDS } from '../types.ts'
+import { CONTACTS_PAGE, DATE_KINDS } from '../types.ts'
 
 export type Customer = {
   id: number
@@ -221,17 +221,84 @@ export async function remove(workspaceId: number, id: number) {
 export const get = (workspaceId: number, id: number) =>
   one<Customer>(`SELECT * FROM customers WHERE workspace_id = ? AND id = ?`, workspaceId, id)
 
-export const list = (workspaceId: number) =>
-  all<Customer & { channels: string[]; conversations: number }>(
-    `SELECT c.*,
+/** One page of a long list, and how many there are altogether. */
+export type Page<T> = { rows: T[]; total: number }
+
+/** What the contacts table draws. Deliberately not the whole record — see `list`. */
+export type Listed = Pick<
+  Customer,
+  'id' | 'name' | 'first_name' | 'last_name' | 'company' | 'job_title' | 'email' | 'phone' | 'tags' | 'do_not_contact' | 'last_seen_at'
+> & { channels: string[]; conversations: number }
+
+
+
+/**
+ * One page of the contacts list.
+ *
+ * Three things changed here at once, and they are one change: the page had been loading every
+ * contact in the workspace and filtering them in the browser.
+ *
+ * **Not `c.*`.** That table is 31 columns wide and includes `traits`, `notes`, and an
+ * AI-written `summary` with its own `summary_points` — none of which the list draws, and all
+ * of which crossed the wire per row. What is selected here is what the page renders and
+ * nothing else; the contact page fetches the full record when somebody opens one.
+ *
+ * **The search moved into SQL**, as an ILIKE against the generated `search` column rather than
+ * a tsvector. The box has always matched substrings — a phone fragment, part of an address —
+ * and word-stem matching would answer none of those. See 065_paging.sql.
+ *
+ * **The order ends in `id`.** An import hands hundreds of contacts the same `last_seen_at`,
+ * and without a unique tiebreaker OFFSET pages can repeat or skip rows between them. That is
+ * the failure that reads as "a contact went missing" rather than as a paging bug.
+ *
+ * `total` comes back with the rows because a pager needs it, and because a count that
+ * disagrees with the list is worse than no count at all.
+ */
+export async function list(
+  workspaceId: number,
+  opts: { find?: string; page?: number; size?: number } = {},
+): Promise<Page<Listed>> {
+  const size = Math.min(Math.max(1, opts.size ?? CONTACTS_PAGE), 200)
+  // Trimmed to null rather than '': an empty needle must mean "no filter", not "match rows
+  // containing the empty string", which is every row and a wasted index scan.
+  const find = opts.find?.trim().toLowerCase() || null
+  // The pattern is built here, once, rather than concatenated into the SQL at two call sites.
+  // % and _ are escaped so a customer searching for "50%" is not handed the whole table.
+  const like = find ? `%${find.replace(/[\\%_]/g, (m) => `\\${m}`)}%` : null
+
+  const totals = await one<{ n: number }>(
+    `SELECT count(*)::int AS n FROM customers c
+      WHERE c.workspace_id = ? AND (?::text IS NULL OR c.search LIKE ? ESCAPE '\\')`,
+    workspaceId,
+    like,
+    like,
+  )
+  const total = totals?.n ?? 0
+
+  // Clamped against the total rather than trusted: ?page=900 on a two-page list should show
+  // the last page, not an empty one that looks like the data is gone.
+  const pages = Math.max(1, Math.ceil(total / size))
+  const at = Math.min(Math.max(0, opts.page ?? 0), pages - 1)
+
+  const rows = await all<Listed>(
+    `SELECT c.id, c.name, c.first_name, c.last_name, c.company, c.job_title,
+            c.email, c.phone, c.tags, c.do_not_contact, c.last_seen_at,
             COALESCE((SELECT array_agg(DISTINCT i.channel) FROM customer_identities i
                        WHERE i.customer_id = c.id), '{}') AS channels,
             (SELECT count(*)::int FROM conversations v WHERE v.customer_id = c.id) AS conversations
        FROM customers c
-      WHERE c.workspace_id = ?
-      ORDER BY c.last_seen_at DESC`,
+      WHERE c.workspace_id = ? AND (?::text IS NULL OR c.search LIKE ? ESCAPE '\\')
+      ORDER BY c.last_seen_at DESC, c.id DESC
+      LIMIT ? OFFSET ?`,
     workspaceId,
+    like,
+    like,
+    size,
+    at * size,
   )
+
+  return { rows, total }
+}
 
 export const identitiesOf = (workspaceId: number, customerId: number) =>
   all<{ channel: string; external_id: string }>(
@@ -414,6 +481,38 @@ export async function update(
 
 // ---------------------------------------------------------------- ways of reaching them
 
+/**
+ * A phone number in the one shape WhatsApp will accept.
+ *
+ * **No default country code, and that is the whole design.** A bare `91234567` is ambiguous
+ * and the obvious fix — assume the instance’s own country — is how a broadcast reaches a
+ * stranger in another one. The number came from a spreadsheet somebody pasted; the only
+ * honest answer to an ambiguous one is to refuse it and say what is missing.
+ *
+ * Separators, brackets and spaces go, because every CRM export writes them differently and
+ * none of that is the ambiguous part. A `+` has to be there before stripping, since it is the
+ * only thing that distinguishes a full number from a local one — but it is allowed to arrive
+ * inside brackets, because `(+44) 20 7946 0000` is a real shape and it is not ambiguous.
+ */
+export function toE164(raw: string): string {
+  const trimmed = raw.trim()
+  const digits = trimmed.replace(/\D/g, '')
+  if (!/^[\s([]*\+/.test(trimmed) || digits.length < 8 || digits.length > 15)
+    throw new Error(
+      `“${trimmed.slice(0, 24)}” is not a number WhatsApp can reach — include the country code, like +6591234567.`,
+    )
+  return `+${digits}`
+}
+
+/** The same, for a list where one bad row must not lose the other nine hundred. */
+export const asE164 = (raw: string): string | null => {
+  try {
+    return toE164(raw)
+  } catch {
+    return null
+  }
+}
+
 export const points = (workspaceId: number, customerId: number) =>
   all<Point>(
     `SELECT id, kind, value, label, is_primary FROM customer_points
@@ -520,9 +619,9 @@ async function setPrimaries(workspaceId: number, customerId: number) {
 /**
  * What one customer told us about their own availability.
  *
- * Kept here rather than on a project, and reached from a board by joining `project_leads` —
- * the same way a booking reaches one. A person is away in September whichever boards they
- * happen to be on, and taking them off a board must not delete the fact that they are away.
+ * Kept on the customer rather than on anything they are booked into. A person is away in
+ * September whichever course they signed up for, and cancelling the booking must not delete
+ * the fact that they are away.
  */
 export type CustomerDate = {
   id: number

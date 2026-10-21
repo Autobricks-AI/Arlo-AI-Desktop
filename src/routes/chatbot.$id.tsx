@@ -2,12 +2,14 @@ import { useState } from 'react'
 import { Link, createFileRoute, useRouter } from '@tanstack/react-router'
 import { createServerFn, useServerFn } from '@tanstack/react-start'
 import { NotFound } from '../components/NotFound'
+import { lightDismiss } from '../components/Modal'
 import { requireSession } from '../server/auth'
 import * as bots from '../server/bot'
 import { options } from '../server/botform'
 import * as lessons from '../server/lessons'
 import * as resources from '../server/resources'
 import * as catalogue from '../server/catalogue'
+import { liveTakeover } from '../server/agent'
 import { SECTIONS, Section, Steps } from '../components/BotSections'
 import type { Draft, SectionId } from '../components/BotSections'
 import { BOT_MODES } from '../types'
@@ -33,6 +35,30 @@ const save = createServerFn({ method: 'POST' })
   .validator((d: { id: number; patch: bots.Patch }) => d)
   .handler(async ({ data }) => bots.save((await requireSession()).workspaceId, data.id, data.patch))
 
+/** What going live would do to the threads people are holding. Asked before it is agreed to. */
+const liveImpact = createServerFn({ method: 'POST' })
+  .validator((id: number) => id)
+  .handler(async ({ data }) => liveTakeover((await requireSession()).workspaceId, data))
+
+/**
+ * Go live, and mean it.
+ *
+ * Saving the mode is the whole of it: `bots.save` already hands the backlog over on the
+ * transition to live, and sweeping again here would be a second pass answering the same
+ * customers a second time. The dialog's job is to say what that save is about to do, not to
+ * do it twice.
+ *
+ * Saved here rather than left to the page's own Save because the two are one decision --
+ * somebody who agreed to the dialog agreed to the messages, and a button they might not
+ * press must not be what decides whether forty conversations are answered.
+ */
+const goLive = createServerFn({ method: 'POST' })
+  .validator((id: number) => id)
+  .handler(async ({ data }) => {
+    const s = await requireSession()
+    await bots.save(s.workspaceId, data, { mode: 'live' })
+  })
+
 /**
  * Write, correct or delete one of this bot's answers.
  *
@@ -40,13 +66,6 @@ const save = createServerFn({ method: 'POST' })
  * queries themselves — every one of them is scoped, so a bot in somebody else's workspace
  * matches nothing rather than being edited.
  */
-const addExample = createServerFn({ method: 'POST' })
-  .validator((d: { botId: number; question: string; answer: string; resourceIds: number[] }) => d)
-  .handler(async ({ data }) => {
-    const s = await requireSession()
-    await lessons.addExample(s.workspaceId, data.botId, data)
-  })
-
 const editExample = createServerFn({ method: 'POST' })
   .validator((d: { id: number; question: string; answer: string; resourceIds: number[] }) => d)
   .handler(async ({ data }) => {
@@ -58,9 +77,74 @@ const editExample = createServerFn({ method: 'POST' })
     await lessons.setResources(s.workspaceId, data.id, data.resourceIds)
   })
 
-const removeExample = createServerFn({ method: 'POST' })
-  .validator((id: number) => id)
-  .handler(async ({ data }) => lessons.removeExample((await requireSession()).workspaceId, data))
+/** Turn down a proposed wording so it stops being offered. Nothing approved changes. */
+const dismissSuggestion = createServerFn({ method: 'POST' })
+  .validator((d: { id: number }) => d)
+  .handler(async ({ data }) => lessons.dismissSuggestion((await requireSession()).workspaceId, data.id))
+
+/** Read a knowledge base for things it sells, proposing each one the way a conversation does. */
+const readCatalogue = createServerFn({ method: 'POST' })
+  .validator((d: { baseId: number }) => d)
+  .handler(async ({ data }) => lessons.fromBase((await requireSession()).workspaceId, data.baseId))
+
+/** Read this bot's conversations now rather than waiting for the sweep. */
+const scanLessons = createServerFn({ method: 'POST' })
+  .validator((botId: number) => botId)
+  .handler(async ({ data }) => lessons.scan((await requireSession()).workspaceId, data))
+
+/**
+ * One page of the review queue, read when the door opens rather than on every page load.
+ *
+ * It used to come down with the loader: every proposal, with its question, its answer and what
+ * it nearly matched, re-sent after each approval. On a bot with a long queue that is almost the
+ * whole payload, and the grouping behind it was most of the time the page took to open.
+ */
+const loadQueue = createServerFn({ method: 'GET' })
+  .validator((d: { botId: number; kind: string; find: string; page: number }) => d)
+  .handler(async ({ data }) =>
+    lessons.queue((await requireSession()).workspaceId, data.botId, {
+      kind: data.kind,
+      find: data.find,
+      page: data.page,
+    }),
+  )
+
+/** The hour a learned date is missing, filled in by the person reviewing it. */
+const setLessonTimes = createServerFn({ method: 'POST' })
+  .validator((d: { id: number; start_time?: string | null; end_time?: string | null; calendar_id?: number | null }) => d)
+  .handler(async ({ data }) => {
+    const s = await requireSession()
+    await lessons.setTimes(s.workspaceId, data.id, data)
+  })
+
+/** Approving is a decision about a row, so it saves at once rather than on Save. */
+const decideLessons = createServerFn({ method: 'POST' })
+  .validator(
+    (d: {
+      ids: number[]
+      status: 'approved' | 'rejected'
+      botId: number
+      /** Files a reviewer crossed off an answer before approving it. */
+      crossed?: { lesson: number; file: number }[]
+    }) => d,
+  )
+  .handler(async ({ data }) => {
+    const s = await requireSession()
+    await lessons.decide(s.workspaceId, data.ids, data.status, data.crossed ?? [])
+    /*
+     * What the bot may now reach, back to the form.
+     *
+     * Approving a file connects it to the bot and approving a fact connects the base it was
+     * filed in — both on the server, both invisible to a form whose draft was read once when
+     * the page loaded. The checkbox stayed unticked, which was the visible half; the other
+     * half was worse, because pressing Save afterwards wrote the stale list back and
+     * unlinked the very thing that had just been approved.
+     */
+    return {
+      resourceIds: (await resources.forBot(s.workspaceId, data.botId)).map((r) => r.id),
+      baseIds: (await bots.connectedBases(s.workspaceId, data.botId)).map((b) => b.base_id),
+    }
+  })
 
 /**
  * Adding a resource is a workspace action, not part of a bot.
@@ -244,9 +328,15 @@ function DetailView({ data }: { data: Data }) {
   const { tab } = Route.useSearch()
   const router = useRouter()
   const saveFn = useServerFn(save)
-  const addExampleFn = useServerFn(addExample)
+  const impactFn = useServerFn(liveImpact)
+  const goLiveFn = useServerFn(goLive)
+  const queueFn = useServerFn(loadQueue)
   const editExampleFn = useServerFn(editExample)
-  const removeExampleFn = useServerFn(removeExample)
+  const dismissFn = useServerFn(dismissSuggestion)
+  const decideFn = useServerFn(decideLessons)
+  const timesFn = useServerFn(setLessonTimes)
+  const scanFn = useServerFn(scanLessons)
+  const readFn = useServerFn(readCatalogue)
   const addResourceFn = useServerFn(addResource)
   const renameResourceFn = useServerFn(renameResource)
   const deleteResourceFn = useServerFn(deleteResource)
@@ -257,6 +347,17 @@ function DetailView({ data }: { data: Data }) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [saved, setSaved] = useState(false)
+  /*
+   * What going live would do, held while the dialog asks about it. Null is "not asking".
+   * Fetched rather than guessed, because the number of threads it will answer is the whole
+   * reason somebody hesitates over this button.
+   */
+  const [going, setGoing] = useState<{ threads: number; answering: number } | null>(null)
+  /*
+   * Something that went right, which the error line is the wrong colour for. Going live can
+   * put messages in front of real customers, and that is not a thing to do silently.
+   */
+  const [notice, setNotice] = useState('')
 
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => {
     setDraft((d) => ({ ...d, [key]: value }))
@@ -319,6 +420,32 @@ function DetailView({ data }: { data: Data }) {
             {data.bot.description || 'No description.'}
           </p>
         </div>
+        {/*
+          Before the run modes, and solid rather than outlined.
+
+          Talking to it is the thing to try first — the same argument broadcasts makes for
+          putting "Send a test" beside the real action — and the modes next to it are the
+          thing that changes what customers get. Reaching the dangerous control first, past a
+          safe one that answers the same question, is the wrong way round.
+
+          It tests the bot *as saved*: this navigates away from an unsaved form, which the
+          sticky bar already warns about. Disabling it while dirty would make it dead exactly
+          when somebody most wants to check a change, so the title says so instead.
+        */}
+        <div className="actions">
+          <Link
+            to="/playground/$id"
+            params={{ id: String(data.bot.id) }}
+            className="button primary"
+            title={
+              dirty
+                ? 'Chat with this bot. It answers as last saved, so save first to try your changes.'
+                : 'Chat with this bot. Nothing is saved.'
+            }
+          >
+            Playground
+          </Link>
+        </div>
         <div className="runmode">
           {/*
             Three states, not a switch, because "paused" and "learning" are both silent and
@@ -330,7 +457,27 @@ function DetailView({ data }: { data: Data }) {
                 key={m}
                 className={draft.mode === m ? 'on' : ''}
                 aria-pressed={draft.mode === m}
-                onClick={() => set('mode', m)}
+                /*
+                  Live is the one that asks. It is not only a label on this page: it hands
+                  every thread a person is holding back to the bot and answers the ones still
+                  waiting on an answer, which is messages to real customers. The other two
+                  are silent, so they stay a click.
+
+                  Only when it is not already live -- re-picking the mode it is in should not
+                  threaten to answer anybody.
+                */
+                onClick={() => {
+                  if (m !== 'live' || data.bot.mode === 'live') return set('mode', m)
+                  setErr('')
+                  setNotice('')
+                  void (async () => {
+                    try {
+                      setGoing(await impactFn({ data: data.bot.id }))
+                    } catch (e) {
+                      setErr(e instanceof Error ? e.message : String(e))
+                    }
+                  })()
+                }}
               >
                 {m === 'live' ? 'Live' : m === 'learning' ? 'Learning' : 'Paused'}
               </button>
@@ -348,6 +495,12 @@ function DetailView({ data }: { data: Data }) {
         </p>
       )}
 
+      {notice && (
+        <p className="note" role="status">
+          {notice}
+        </p>
+      )}
+
       <>
           <div className="card sectioncard">
             <Section
@@ -356,17 +509,40 @@ function DetailView({ data }: { data: Data }) {
               set={set}
               options={{
                 ...data.options,
-                onAddExample: async (input) => {
-                  await addExampleFn({ data: { ...input, botId: data.bot.id } })
-                  await refresh(router)
-                },
                 onEditExample: async (input) => {
                   await editExampleFn({ data: input })
                   await refresh(router)
                 },
-                onRemoveExample: async (id) => {
-                  await removeExampleFn({ data: id })
+                onDismissSuggestion: async (id) => {
+                  await dismissFn({ data: { id } })
                   await refresh(router)
+                },
+                onQueue: (q) => queueFn({ data: { ...q, botId: data.bot.id } }),
+                onDecide: async (input) => {
+                  const now = await decideFn({ data: { ...input, botId: data.bot.id } })
+                  // Merged rather than replaced: somebody may have ticked something else
+                  // while reviewing, and their unsaved edit is not this function's to undo.
+                  set('resourceIds', [...new Set([...draft.resourceIds, ...now.resourceIds])])
+                  set('baseIds', [...new Set([...draft.baseIds, ...now.baseIds])])
+                  await refresh(router)
+                },
+                onScan: async () => {
+                  const found = await scanFn({ data: data.bot.id })
+                  await refresh(router)
+                  return found
+                },
+                /*
+                 * No loader invalidation. The row whose hours changed is in the review queue,
+                 * which the component owns and re-reads itself -- and the loader behind it is
+                 * the whole chatbot, which is a great deal of work for one time field.
+                 */
+                onLessonTimes: async (input) => {
+                  await timesFn({ data: input })
+                },
+                onReadCatalogue: async (baseId) => {
+                  const got = await readFn({ data: { baseId } })
+                  await refresh(router)
+                  return got
                 },
                 onAddResource: async (body) => {
                   await addResourceFn({ data: body })
@@ -399,6 +575,85 @@ function DetailView({ data }: { data: Data }) {
             <span className="note">Last changed {new Date(data.bot.updated_at).toLocaleString()}</span>
           </div>
       </>
+
+      {going && (
+        /*
+         * The same dialog the inbox uses to wake a bot on one thread, asking the wider
+         * version of that question. What it must say before anybody agrees: how many
+         * conversations stop being a person's, and how many customers hear from the bot in
+         * the next few seconds.
+         */
+        <dialog className="sheet" ref={(el) => el?.showModal()} onClick={lightDismiss} onClose={() => setGoing(null)}>
+          <div className="sheetbody">
+            <h3 style={{ marginTop: 0 }}>Set {data.bot.name} live?</h3>
+            <p className="note">{MODE_MEANS.live}</p>
+            {going.threads === 0 ? (
+              <p className="note">No conversation is with a person right now, so nothing changes in the inbox.</p>
+            ) : (
+              <>
+                <p className="note">
+                  <strong>
+                    {going.threads} conversation{going.threads === 1 ? '' : 's'}
+                  </strong>{' '}
+                  {going.threads === 1 ? 'is' : 'are'} with a person. {going.threads === 1 ? 'It goes' : 'They go'} back
+                  to {data.bot.name}, which takes the next message on {going.threads === 1 ? 'it' : 'each of them'}.
+                </p>
+                {going.answering > 0 ? (
+                  <p className="note">
+                    <strong>
+                      {going.answering} of {going.threads === 1 ? 'them' : 'those'}
+                    </strong>{' '}
+                    {going.answering === 1 ? 'is' : 'are'} waiting on an answer, so {data.bot.name} replies to{' '}
+                    {going.answering === 1 ? 'that customer' : 'those customers'} straight away. A thread whose last
+                    message was a goodbye is handed back without a reply.
+                  </p>
+                ) : (
+                  <p className="note">
+                    None of them is waiting on an answer, so nobody hears from {data.bot.name} until they write again.
+                  </p>
+                )}
+              </>
+            )}
+            <div className="row" style={{ marginTop: 16 }}>
+              <button
+                disabled={busy}
+                onClick={() => {
+                  const asked = going
+                  setGoing(null)
+                  void (async () => {
+                    setBusy(true)
+                    setErr('')
+                    try {
+                      await goLiveFn({ data: data.bot.id })
+                      // The draft follows the server, so the page does not show Learning
+                      // beside a bot that is now answering.
+                      setDraft((d) => ({ ...d, mode: 'live' }))
+                      await router.invalidate()
+                      setNotice(
+                        asked.threads
+                          ? `${data.bot.name} is live. ${asked.threads} conversation${
+                              asked.threads === 1 ? '' : 's'
+                            } handed back${asked.answering ? `, ${asked.answering} being answered now` : ''}.`
+                          : `${data.bot.name} is live.`,
+                      )
+                    } catch (e) {
+                      setGoing(asked)
+                      setErr(e instanceof Error ? e.message : String(e))
+                    } finally {
+                      setBusy(false)
+                    }
+                  })()
+                }}
+              >
+                {going.threads ? 'Go live and hand them back' : 'Go live'}
+              </button>
+              <button className="ghost" disabled={busy} onClick={() => setGoing(null)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </dialog>
+      )}
     </>
   )
 }

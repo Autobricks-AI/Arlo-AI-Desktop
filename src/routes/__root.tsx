@@ -139,6 +139,9 @@ p.lede { color: var(--smoke); font-size: 17px; margin: 0 0 32px; max-width: 62ch
 .note { color: var(--smoke); font-size: 13px; }
 /* Like .note, but for something the operator probably wants to act on. */
 .warn { color: var(--warn-ink); font-size: 13px; }
+/* Its opposite, for the line that says something worked. Same size and weight: good news
+   that shouts is as hard to skim past as bad news that whispers. */
+.ok { color: var(--ok-ink); font-size: 13px; }
 a { color: var(--moss); }
 
 /* The ancestor this page hangs off, named rather than called "Back". Sits above the title. */
@@ -408,13 +411,15 @@ label { display: block; font-size: 13px; font-weight: 500; color: var(--smoke); 
  * Names rather than hex values on the row, so a calendar cannot be made unreadable and the
  * colours stay this app's — set once here, used by the tick, the swatch and every entry.
  */
+/* Blue leads because a calendar defaults to it, and red is next because a project does. */
+.sky { --src: #2b6b8f; }
+.rose { --src: #b03a48; }
 .moss { --src: var(--moss); }
 .amber { --src: #b7791f; }
 .plum { --src: #7c3f6b; }
-.sky { --src: #2b6b8f; }
 .clay { --src: #a35a3c; }
 .slate { --src: #5b6472; }
-.calentry.moss, .calentry.amber, .calentry.plum, .calentry.sky, .calentry.clay, .calentry.slate {
+.calentry.moss, .calentry.amber, .calentry.plum, .calentry.sky, .calentry.rose, .calentry.clay, .calentry.slate {
   border-left: 3px solid var(--src);
 }
 .swatch {
@@ -554,17 +559,45 @@ tr.done td { opacity: 0.45; }
 }
 /* Mark and name on one line, the mark holding its size in a flex row. */
 .chline { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/*
+ * A chat box that takes files: what is about to go with the message, and where to drop one.
+ *
+ * The drop target is the composer rather than the textarea because that is what somebody
+ * aims at, and the dashed outline only appears mid-drag — a box permanently advertising that
+ * it accepts files is noise in a thing people type into all day.
+ */
+.composer { border: 1px dashed transparent; border-radius: var(--r-sm); margin: -6px; padding: 6px; }
+.composer.dragging { border-color: var(--ink); background: var(--sand); }
+.chline.attached { margin-bottom: 8px; }
+.chline.attached .pill { padding-left: 6px; }
+/* Small enough to sit in a chip, square so five screenshots line up rather than stagger. */
+.chipthumb { width: 20px; height: 20px; border-radius: 3px; object-fit: cover; margin-right: 6px; vertical-align: middle; }
+/* On a sent turn, the same ceiling the inbox puts on an image in a bubble. */
+.bubble .sentimg { display: block; max-width: 100%; max-height: 220px; border-radius: var(--r-sm); margin-top: 8px; }
 .chicon { flex: none; vertical-align: -2px; }
 /* Each channel's own brand mark, darkened to sit on parchment without glaring. */
 .src-web { --src: var(--moss); }
 .src-email { --src: var(--smoke); }
 .src-gmail { --src: #d93025; }
 .src-outlook { --src: #5c2d91; }
+/*
+ * Two WhatsApps, two colours.
+ *
+ * Both connectors are the same whatsapp channel, so a thread on a linked handset and one
+ * on the Business API used to be the same green — and the two are answered differently:
+ * Business threads may also be live in somebody else’s inbox. Plum is far enough from the
+ * green to read at a glance, and is already in the palette above.
+ */
 .src-whatsapp { --src: #128c7e; }
+.src-whatsapp_cloud { --src: #7c3f6b; }
 .src-telegram { --src: #229ed9; }
 .src-linkedin { --src: #0a66c2; }
 .src-instagram { --src: #c13584; }
 .src-discord { --src: #5865f2; }
+/* Messenger's blue rather than the Page's: what a workspace connects is an inbox. */
+.src-facebook { --src: #0084ff; }
+/* TikTok's mark is black, and ink is as near as parchment takes without glaring. */
+.src-tiktok { --src: var(--ink); }
 .src-x, .src-other, .src-phone { --src: var(--smoke); }
 .src-website { --src: var(--moss); }
 /* A credential and its buttons: the field takes the room, the buttons keep their size. */
@@ -634,6 +667,20 @@ a.button.primary, button.primary { background: var(--ink); color: var(--white); 
 .botcard dl.facts dd { margin: 0; font-size: 14px; overflow-wrap: anywhere; }
 .botcard .mono, .review .mono { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12.5px; }
 .botcard .cardfoot { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--line); }
+/*
+ * A bot card in the playground picker, where the whole card is the link.
+ *
+ * There is exactly one thing to do with a bot here, so asking somebody to aim at a button
+ * inside the card would be giving them a target with no competition. It borrows .botcard's
+ * shape and only has to undo the anchor: no underline, inherited colour, and a border that
+ * answers the pointer so it reads as pressable rather than as a panel that happens to move.
+ */
+.botcard.pickbot { text-decoration: none; color: inherit; transition: border-color .12s, box-shadow .12s; }
+.botcard.pickbot:hover { border-color: var(--ink); box-shadow: 0 2px 10px rgba(0,0,0,.06); }
+.botcard.pickbot .go { margin-top: auto; padding-top: 10px; font-size: 13px; font-weight: 500; color: var(--moss); }
+/* A proposed wording, offered under the answer it would replace. Set apart so it reads as an
+   offer rather than as more of the example. */
+.suggestion { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--sand); }
 
 .card.empty { text-align: center; padding: 44px 24px; max-width: 520px; margin: 8px auto 0; }
 .card.empty p { margin: 6px auto 0; max-width: 42ch; }
@@ -929,7 +976,36 @@ button.calday:focus-visible { outline: 2px solid var(--moss); outline-offset: -2
   text-decoration: none; color: var(--ink); overflow: hidden;
 }
 .calentry .calwho { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/*
+ * How many more dates sit in this exact slot. Folded rather than merged: two courses really
+ * can run the same days at the same hours, so the count opens the day rather than deciding.
+ */
+.calentry .calmore {
+  flex: none; margin-left: auto; font-style: normal; font-size: 11px; font-weight: 600;
+  opacity: 0.6; font-variant-numeric: tabular-nums;
+}
 .calentry b { font-variant-numeric: tabular-nums; font-weight: 500; }
+/*
+ * Dates sharing a slot, boxed with the buttons that act on them.
+ *
+ * A loose row of "Keep" buttons under a flat list gives no clue which dates any of them would
+ * remove. The border is doing the explaining.
+ */
+.slotgroup {
+  border: 1px solid var(--edge); border-radius: var(--r-md);
+  padding: 12px; margin: 10px 0; background: var(--sand);
+}
+.slotgroup > header { margin-bottom: 8px; }
+.slotgroup > header b { display: block; font-size: 14px; }
+.slotgroup > header small { display: block; margin-top: 2px; max-width: 64ch; }
+/* On the group's own ground rather than the sheet's, so the box reads as one thing. */
+.slotgroup .dayitem { background: var(--white); }
+.slotkeep { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+/* The offer to break a span into its days, beside the explanation of why you might. */
+.splitnote {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  margin: 14px 0 0; padding: 10px 12px; background: var(--sand); border-radius: var(--r-sm);
+}
 /* The two kinds are different commitments — a slot somebody agreed to, and a follow-up
    somebody owes — so they do not look the same. */
 .calentry.booking { background: var(--ok-face); color: var(--ok-ink); }
@@ -1141,6 +1217,8 @@ main:has(> .page > .fullheight) { overflow: hidden; }
 .msgs { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding-right: 4px; }
 .watermark { display: flex; align-items: center; gap: 8px; color: var(--smoke); font-size: 11px; text-align: center; }
 .watermark::before, .watermark::after { content: ''; flex: 1; border-top: 1px solid var(--line); }
+.watermark { display: flex; align-items: center; gap: 8px; color: var(--smoke); font-size: 11px; text-align: center; }
+.watermark::before, .watermark::after { content: ''; flex: 1; border-top: 1px solid var(--line); }
 .bubble {
   max-width: 78%; padding: 9px 12px; border-radius: 12px; font-size: 14px; line-height: 1.45;
   white-space: pre-wrap; overflow-wrap: anywhere;
@@ -1156,9 +1234,15 @@ main:has(> .page > .fullheight) { overflow: hidden; }
  * rather than an icon set — legible at any size, no assets to ship, and never wrong about
  * a format nobody anticipated.
  */
+/*
+ * A button rather than a link now, because opening it shows a sheet over the thread instead
+ * of leaving for a new tab — so the browser's own button paint has to come off: its
+ * background, its font, and the text alignment it centres by default.
+ */
 .bubble .file {
-  display: flex; align-items: center; gap: 10px; margin-top: 8px;
-  color: inherit; text-decoration: none;
+  display: flex; align-items: center; gap: 10px; margin-top: 8px; width: 100%;
+  color: inherit; text-decoration: none; text-align: left; font: inherit; background: none;
+  cursor: pointer;
   border: 1px solid currentColor; border-radius: var(--r-sm); padding: 8px 10px; opacity: 0.9;
 }
 .bubble .file:hover { opacity: 1; }
@@ -1167,24 +1251,291 @@ main:has(> .page > .fullheight) { overflow: hidden; }
   border-radius: var(--r-sm); background: currentColor; font-family: ui-monospace, SFMono-Regular, monospace;
   font-size: 10px; font-weight: 600; letter-spacing: 0.03em;
 }
-/* The letters are knocked out of the block, so they read on either bubble colour. */
-.bubble.out .filekind { color: var(--ink); }
-.bubble.in .filekind { color: var(--white); }
+/*
+ * The letters are knocked out of the block, so they read on either bubble colour.
+ *
+ * Both halves stated, which they were not: the base rule sets background to currentColor, so
+ * setting only the colour made the block and its letters the same shade -- an ink square with
+ * ink letters on the dark bubble, a white square with white letters on the light one. The
+ * glyph was invisible in both, which is the one place it had to work.
+ */
+.bubble.out .filekind { background: var(--white); color: var(--ink); }
+.bubble.in .filekind { background: var(--ink); color: var(--white); }
 .bubble .filewho { min-width: 0; }
 .bubble .filewho b { display: block; font-weight: 500; font-size: 13px; overflow-wrap: anywhere; }
 .bubble .filewho small { display: block; opacity: 0.75; font-size: 11px; margin: 0; }
 /* Its own thumbnail, and nothing around it. */
-.bubble .file.image { display: block; border: 0; padding: 0; }
+.bubble .file.image { display: block; border: 0; padding: 0; width: auto; }
 .bubble .file.image img {
   display: block; max-width: 100%; max-height: 280px; border-radius: var(--r-sm);
 }
+
+/*
+ * ---------------------------------------------------------------- picking days
+ *
+ * The same seven-column calgrid, with its own cell. A calday is a container for a day's
+ * entries -- 96px tall, a flex column -- and a picker's cell holds one number and a pressed
+ * state, so it borrows the grid and nothing else.
+ */
+.calgrid.picker { flex: none; max-height: none; }
+button.calpick {
+  background: var(--white); border: 0; padding: 10px 0; font: inherit; font-size: 13px;
+  color: var(--ink); cursor: pointer; text-align: center; appearance: none;
+}
+.calgrid.picker .calhead { text-align: center; padding: 7px 0; }
+button.calpick:hover { background: var(--sand); }
+button.calpick.outside { color: var(--smoke); }
+button.calpick[aria-pressed='true'] { background: var(--ink); color: var(--white); font-weight: 600; }
+/* Today, when it is not picked: an outline rather than a fill, so the two never read alike. */
+button.calpick.now:not([aria-pressed='true']) { box-shadow: inset 0 0 0 2px var(--moss); }
+button.calpick:disabled { cursor: not-allowed; opacity: 0.45; }
+.pickeddays { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.pickeddays .chip { padding-right: 6px; }
+.pickeddays .chip button {
+  background: none; border: 0; padding: 0 2px; font: inherit; color: inherit; cursor: pointer; opacity: 0.6;
+}
+.pickeddays .chip button:hover { opacity: 1; }
+
+/*
+ * ---------------------------------------------------------------- a message, as it lands
+ *
+ * The template preview's chat variant: the same bubble, dressed as the conversation it is
+ * about to appear in.
+ *
+ * Worth the thirty lines because the question being asked of it is different. Everywhere
+ * else a preview answers "what does this template say", and a grey box does that. On a flow
+ * somebody is deciding whether a stranger's first impression of the company is right, and
+ * that is a judgement about the thing on the phone -- the attachment above the text, the
+ * width the lines break at, the buttons under it -- not about the words in isolation.
+ *
+ * WhatsApp's own outgoing green rather than the app's ink, for the same reason. Using the
+ * product's palette here would be consistent and would quietly misrepresent the one screen
+ * this is pretending to be.
+ */
+.wachat {
+  border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden;
+  background: #efe7dd;
+  /* The faint pattern a real chat has, without shipping an asset for it. */
+  background-image: radial-gradient(rgba(0, 0, 0, 0.045) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+.wascroll { display: flex; flex-direction: column; padding: 16px 14px; max-height: 560px; overflow-y: auto; }
+.bubble.wa {
+  align-self: flex-end; max-width: 92%; background: #d9fdd3; color: #111b21;
+  border-bottom-right-radius: 3px; box-shadow: 0 1px 1px rgba(0, 0, 0, 0.1);
+  padding: 7px 9px 18px; position: relative;
+}
+.bubble.wa .note { color: #54656f; }
+/* The time sits in the padding the bubble leaves for it, which is how the real one does it. */
+.bubble.wa .wawhen {
+  position: absolute; right: 10px; bottom: 5px; font-size: 11px; color: #667781;
+}
+/* The attachment above the text: a block inside the bubble, not a card beside it. */
+.wadoc {
+  display: flex; align-items: center; gap: 10px;
+  background: rgba(0, 0, 0, 0.05); border-radius: 7px; padding: 10px; margin-bottom: 7px;
+}
+.wadoc .filekind {
+  flex: none; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 6px;
+  background: #ea4335; color: #fff;
+  font-family: ui-monospace, SFMono-Regular, monospace; font-size: 10px; font-weight: 600;
+}
+.wadoc .filewho { min-width: 0; }
+.wadoc .filewho b { display: block; font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.wadoc .filewho small { display: block; font-size: 11px; color: #667781; }
+/* Quick replies: full width, separated by a hairline, the way WhatsApp stacks them. */
+.wabtns { margin: 8px -9px -12px; border-top: 1px solid rgba(0, 0, 0, 0.08); }
+.wabtns span {
+  display: block; padding: 9px; text-align: center; font-size: 14px; color: #027eb5;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+}
+.wabtns span:first-child { border-top: 0; }
+
+/*
+ * The form on the left, what it produces on the right.
+ *
+ * Sticky because the preview is the thing being judged and the form is longer than it: a
+ * template with four placeholders scrolls the answer off the screen exactly when somebody is
+ * typing the values that change it.
+ */
+.withpreview { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 420px); gap: 18px; align-items: start; }
+.withpreview > .side { position: sticky; top: 16px; }
+@media (max-width: 1000px) {
+  .withpreview { grid-template-columns: 1fr; }
+  .withpreview > .side { position: static; }
+}
+
 /* Known of, not held. Dashed, and it says so on the card. */
 .bubble .file.gone { border-style: dashed; opacity: 0.65; cursor: default; }
 @media (max-width: 900px) { .inboxsplit { grid-template-columns: 1fr; } }
 
-/* Sign-in and the landing hero share this centred column. */
+/* The forms you can reach signed out: sign-in, registration, a new password. One card
+   centred in the viewport. The landing has its own column — see .marketing. */
 .authpage { min-height: 100%; display: grid; place-items: center; padding: 40px 20px; }
 .authcard { width: 100%; max-width: 400px; }
+
+/*
+ * The landing.
+ *
+ * The one page that is read rather than worked in. .authpage centres a single object in
+ * the viewport, which is right for a door and wrong for six sections of prose — so this is
+ * the second bare-page layout, and the last one: a left-aligned column that scrolls like an
+ * ordinary document. 760px is wider than a form and narrower than the app; wide enough for
+ * a three-card row, short enough that a line of lede stays readable.
+ *
+ * main above is a fixed-height scroller, because inside the shell each pane scrolls
+ * itself. Out here it is the document, and these two lines are what stop it becoming a
+ * nested scroll box that fights the URL bar on a phone.
+ */
+main.marketing {
+  max-width: 1080px; margin: 0 auto; padding: 56px 24px 96px;
+  height: auto; overflow: visible;
+}
+/* Prose stays narrow inside a wide column. The page is wide because it carries pictures;
+   a 1080px line of body copy would be unreadable and the pictures would have bought it. */
+.marketing p.lede, .marketing .prose { max-width: 62ch; }
+/* Section rhythm. h2 already carries 36px of its own; the two collapse and this wins, so a
+   section sits further from the one above it than a heading does from its own body copy. */
+.marketing > section + section { margin-top: 60px; }
+.marketing footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line); }
+/* A form keeps a form's width wherever it sits — a 760px-wide box around one email field
+   reads as a banner, which is exactly the thing this page is not. */
+.marketing form.card, .marketing .joined { max-width: 460px; }
+/*
+ * The honeypot.
+ *
+ * Not display:none, which the bots worth stopping already check for. Taken out of the
+ * layout, off the tab order and hidden from the accessibility tree instead, so it is
+ * invisible to a person using the page by any means and ordinary to something filling in
+ * every field it can find.
+ */
+.trap { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
+/*
+ * ---------------------------------------------------------------- the landing's pictures
+ *
+ * Every picture on this page is built from the same divs, hairlines and tokens as the app
+ * itself, rather than being a screenshot. That is not cleverness for its own sake: a PNG
+ * goes stale the day a screen changes, weighs more than the whole stylesheet, and cannot
+ * be read by anything. These re-theme with the palette, cost nothing to ship, and are the
+ * only honest way to show a product that does not have customers to photograph yet.
+ *
+ * All of it is scoped under .marketing, so nothing here can reach the app.
+ */
+
+/* A pane of the product, framed. The dots are the only skeuomorphic thing on the page and
+   they are what makes the reader see "an application" without a caption saying so. */
+.marketing .shot { border: 1px solid var(--line); border-radius: var(--r-md); background: var(--white); overflow: hidden; }
+.marketing .shot .bar { display: flex; align-items: center; gap: 6px; padding: 9px 12px; border-bottom: 1px solid var(--line); background: var(--sand); }
+.marketing .shot .bar i { width: 8px; height: 8px; border-radius: var(--r-full); background: var(--edge); display: block; }
+.marketing .shot .bar em { margin-left: 8px; font-style: normal; font-size: 12px; color: var(--smoke); }
+.marketing .shot .panes { display: grid; grid-template-columns: 148px 1fr; min-height: 0; }
+.marketing .shot .rail { border-right: 1px solid var(--line); padding: 12px 10px; background: var(--sand); }
+.marketing .shot .rail b { display: block; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--smoke); margin: 12px 0 4px 8px; font-weight: 500; }
+.marketing .shot .rail a { display: block; padding: 6px 8px; border-radius: var(--r-sm); font-size: 13px; color: var(--ink); text-decoration: none; }
+.marketing .shot .rail a.on { background: var(--moss-face); color: var(--moss); font-weight: 500; }
+.marketing .shot .pane { padding: 14px; min-width: 0; }
+
+/* A list of things, hairline separated. Threads, sources, deals — same shape each time. */
+.marketing .rows { display: grid; }
+.marketing .rows > div { padding: 10px 2px; border-top: 1px solid var(--line); font-size: 13px; min-width: 0; }
+.marketing .rows > div:first-child { border-top: 0; }
+.marketing .rows .top { display: flex; align-items: baseline; gap: 8px; }
+.marketing .rows .top strong { font-size: 13px; font-weight: 500; }
+.marketing .rows .top span { margin-left: auto; font-size: 11px; color: var(--smoke); white-space: nowrap; }
+.marketing .rows .sub { color: var(--smoke); font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* A conversation. Theirs on the left in the page's own surface, ours on the right in ink,
+   which is the same rule the rest of the system runs on: ink is us acting. */
+.marketing .talk { display: grid; gap: 8px; }
+.marketing .talk .msg { max-width: 82%; padding: 9px 12px; border-radius: var(--r-md); font-size: 13px; line-height: 1.45; }
+.marketing .talk .msg.them { background: var(--sand); border: 1px solid var(--line); }
+.marketing .talk .msg.us { background: var(--ink); color: var(--white); margin-left: auto; }
+.marketing .talk .msg cite { display: block; margin-top: 6px; font-style: normal; font-size: 11px; opacity: 0.72; }
+.marketing .talk .who { font-size: 11px; color: var(--smoke); }
+
+/* The numbered feature blocks, as on the deck: a rule, a number, the claim, the picture. */
+.marketing .feat { border-left: 2px solid var(--ink); padding-left: 22px; }
+.marketing .feat .no { font-size: 13px; font-weight: 600; letter-spacing: 0.06em; color: var(--moss); font-variant-numeric: tabular-nums; }
+.marketing .feat h2 { margin: 4px 0 6px; }
+.marketing .feat .prose { margin: 0 0 18px; }
+.marketing .featgrid { display: grid; gap: 40px 44px; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
+
+/* Two facing columns where a picture sits beside its claim. Collapses on its own. */
+.marketing .beside { display: grid; gap: 36px; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); align-items: center; }
+
+/* Small labelled facts under a picture — what the thing did, in numbers. */
+.marketing .figures { display: flex; flex-wrap: wrap; gap: 26px; margin-top: 18px; }
+.marketing .figures div { font-size: 12px; color: var(--smoke); }
+.marketing .figures strong { display: block; font-size: 22px; font-weight: 600; letter-spacing: -0.02em; color: var(--ink); font-variant-numeric: tabular-nums; }
+
+/*
+ * The board and the connector cards, borrowed rather than redrawn.
+ *
+ * These two pictures use the app's own .lane / .leadcard / .card.src-* classes, so what the
+ * landing shows is literally the same markup the product renders. The only thing added here
+ * is size: the real board is a full-height flex child that scrolls, and inside a picture it
+ * has to be a fixed, quiet block that does not steal the page's scroll or invite a drag.
+ */
+.marketing .board { display: flex; gap: 10px; overflow-x: auto; padding: 0 0 4px; flex: none; }
+.marketing .lane { flex: 0 0 178px; }
+.marketing .lane > header { cursor: default; padding: 8px 10px; }
+.marketing .lane > header strong { font-size: 13px; }
+.marketing .lanecards { padding: 8px; gap: 8px; overflow: visible; flex: none; }
+.marketing .leadcard { cursor: default; gap: 3px; padding: 8px 9px; }
+.marketing .leadcard .leadname { font-size: 13px; cursor: default; }
+.marketing .leadcard .note { font-size: 11px; }
+
+/*
+ * The landing's nav.
+ *
+ * A bar, now that there is more than one thing in it. The earlier rule against one was
+ * written when the page held a single Sign in link and a bar to hold one link is furniture;
+ * four destinations and an action is a component, and loose underlined links at the top of
+ * a page read as an accident. Still not sticky — the page is short enough to scroll and the
+ * call to action is repeated at the foot.
+ */
+.marketing .topnav {
+  display: flex; align-items: center; gap: 2px; flex-wrap: wrap;
+  padding: 7px 8px 7px 16px; margin-bottom: 56px;
+  background: var(--white); border: 1px solid var(--line); border-radius: var(--r-full);
+}
+.marketing .topnav .brand { padding: 0; margin-right: auto; font-size: 17px; }
+.marketing .topnav a.nav {
+  padding: 7px 13px; border-radius: var(--r-full); font-size: 14px; font-weight: 500;
+  color: var(--smoke); text-decoration: none; white-space: nowrap;
+}
+.marketing .topnav a.nav:hover { background: var(--sand); color: var(--ink); }
+/* A nav item carrying a mark. inline-flex so the glyph sits on the text's own line rather
+   than on the baseline, and the gap is what stops the two reading as one word. */
+.marketing .topnav a.nav.withmark { display: inline-flex; align-items: center; gap: 7px; }
+.marketing .topnav a.nav.withmark svg { flex: none; opacity: 0.75; }
+.marketing .topnav a.nav.withmark:hover svg { opacity: 1; }
+.marketing .topnav a.button { margin-left: 6px; padding: 8px 16px; border-radius: var(--r-full); }
+@media (max-width: 620px) {
+  /* Wrapped onto two lines a pill looks like a mistake, so it squares off and the brand
+     takes its own row with the action beside it. */
+  .marketing .topnav { border-radius: var(--r-md); padding: 10px; gap: 4px; }
+  .marketing .topnav .brand { flex: 1 0 100%; margin: 0 0 6px 4px; }
+}
+
+/* Four across on a wide screen, down to one on a phone, with nothing in between that
+   leaves a lonely card on its own row. */
+.marketing .four { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(212px, 1fr)); }
+.marketing .four .card { padding: 18px 16px; }
+.marketing .four h3 { margin: 0 0 6px; }
+/* The comparison table. Two product columns, narrow and centred, so a row reads across. */
+.marketing .compare td:not(:first-child), .marketing .compare th:not(:first-child) { width: 24%; }
+.marketing .compare td:first-child { font-weight: 500; }
+.marketing .compare .yes { color: var(--ok-ink); font-weight: 600; }
+.marketing .compare .no { color: var(--edge); }
+.marketing .compare .soon { color: var(--smoke); font-size: 12px; }
+
+@media (max-width: 720px) {
+  .marketing .shot .panes { grid-template-columns: 1fr; }
+  .marketing .shot .rail { display: none; }
+  .marketing .featgrid { gap: 34px; }
+}
+
 
 /* A title that opens something, styled as a link because that is what it does. */
 button.linky {
@@ -1234,6 +1585,301 @@ progress:indeterminate::-webkit-progress-bar { background: none; }
 .lessonrow .body { flex: 1; min-width: 0; }
 .lessonrow .said { margin: 0; font-size: 13.5px; color: var(--ink); overflow-wrap: anywhere; }
 .lessonrow > button { flex: none; }
+
+/*
+ * The training queue.
+ *
+ * A review screen before it is a settings page: one question per row — is this true, and
+ * should it be said again — so the layout puts the source, the shape of the exchange and
+ * the decision within one glance of each other.
+ */
+.training .queuehead {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap; margin-bottom: 12px;
+}
+.training .queuehead h3 { font-size: 16px; margin: 0 0 2px; }
+.training .queuehead .note { margin: 0; }
+
+/* Stays put while a long queue scrolls under it, because the buttons belong to the whole. */
+.training .reviewbar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  position: sticky; top: 0; z-index: 2;
+  background: var(--white); border: 1px solid var(--line); border-radius: var(--r-md);
+  padding: 10px 14px; margin-bottom: 14px;
+}
+.training .reviewbar .grow { flex: 1; }
+.training .reviewbar .check { align-items: center; }
+.training .reviewbar strong { font-size: 14px; }
+
+/* A heading for each kind, because approving a fact and approving a phrasing are not the
+   same decision and should not read as one list. */
+.lessongroup { margin-top: 18px; }
+.lessongroup > header { margin-bottom: 10px; }
+.lessongroup > header h4 { font-size: 14px; font-weight: 600; margin: 0 0 2px; }
+.lessongroup > header .note { margin: 0; max-width: 68ch; }
+
+/*
+ * Proposals that say nearly the same thing, folded under the first one that said it.
+ *
+ * The fold is attached to its leader rather than floating below it -- the leader loses its
+ * bottom margin and the summary sits flush against it -- so the relationship is legible
+ * before it is opened, and a run of nine cards reads as three decisions.
+ */
+/* What an example will send, shown on the card before the tick rather than after it. */
+.sends { margin: 10px 0 0; }
+.sendrow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; }
+/* The button that opens the picker sits in the row with them, not under it. */
+.sendrow > button.ghost { padding: 4px 12px; font-size: 12.5px; }
+.sendrow > .note { margin: 0; margin-right: 2px; }
+.sendnote { margin: 6px 0 0; }
+.sendrow .chip { max-width: 100%; padding: 0; gap: 0; font-size: 12.5px; overflow: hidden; }
+.sendrow .chipname {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 34ch;
+}
+.sendrow .chip .mark {
+  flex: none; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 5px;
+  background: var(--white); color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, monospace; font-size: 8px; font-weight: 600;
+}
+/*
+ * Still waiting for its own tick, so it is outlined rather than filled: it is named because
+ * it belongs with the answer, not because it is going anywhere yet. The dot repeats that
+ * without a parenthesis of explanation after every name.
+ */
+/*
+ * Crossed off, and still on screen. A file that vanished when you dismissed it gives you
+ * nothing to change your mind with, and changing your mind is most of reviewing.
+ */
+.sendrow .chip.off { background: none; color: var(--smoke); border-color: var(--line); }
+.sendrow .chip.off .chipname { text-decoration: line-through; }
+.sendrow .chip.off .mark { background: var(--line); color: var(--smoke); }
+.sendrow .chip .chiplook { padding: 4px 4px 4px 7px; }
+.sendrow .chip .chipx { padding: 4px 9px 4px 5px; }
+.sendrow .chip.on .chipx:hover, .sendrow .chip.on .chiplook:hover { background: rgba(255, 255, 255, 0.14); }
+.sendrow .chip.off .chipx:hover, .sendrow .chip.off .chiplook:hover { background: var(--sand); }
+
+/* The name looks, the cross removes — two buttons in one pill, so neither does the other.
+   Shared by the review queue and the editor, which is why it hangs off .sendrow. */
+.chiplook, .chipx {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: none; border: 0; color: inherit; font: inherit; cursor: pointer;
+}
+.chiplook { padding: 5px 4px 5px 8px; }
+.chipx { padding: 5px 10px 5px 6px; opacity: 0.65; }
+.chipx:hover, .chiplook:hover { opacity: 1; background: rgba(255, 255, 255, 0.14); }
+
+/* A look at the thing itself, big enough to actually see it. */
+.sheet.peek .sheetbody { max-width: 900px; }
+/*
+ * Title left, the two ways out top right, on one line however long the filename is — and
+ * a phone-generated name is always long. Unscoped, because this sheet opens from the inbox
+ * and from the training queue, and the training-only .queuehead left it with no layout.
+ */
+.peekhead { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.peekhead h3 { margin: 0; font-size: 16px; min-width: 0; overflow-wrap: anywhere; }
+/* Both ways out are the same size, so neither reads as the main one. */
+.peekhead .button, .peekhead button { flex: none; }
+.peekimg { display: block; max-width: 100%; max-height: 72vh; margin: 0 auto; border-radius: var(--r-sm); }
+.peekdoc { width: 100%; height: 72vh; border: 1px solid var(--line); border-radius: var(--r-sm); }
+
+.clustered { margin-bottom: 8px; }
+/* Two card shapes fold: the queue's .lessoncard and the deployed list's .examplecard. */
+.clustered > .lessoncard, .clustered > .examplecard {
+  margin-bottom: 0; border-bottom-left-radius: 0; border-bottom-right-radius: 0;
+}
+.alike > summary {
+  cursor: pointer; list-style: none;
+  font-size: 12px; color: var(--smoke);
+  padding: 7px 16px;
+  border: 1px solid var(--line); border-top: 0;
+  border-radius: 0 0 var(--r-md) var(--r-md);
+  background: var(--sand);
+}
+.alike > summary::-webkit-details-marker { display: none; }
+.alike > summary::before { content: 'B8'; display: inline-block; margin-right: 6px; transition: transform 0.12s; }
+.alike[open] > summary::before { transform: rotate(90deg); }
+.alike > summary:hover { color: var(--ink); border-color: var(--edge); }
+/* Indented so an opened fold cannot be mistaken for the next decision in the queue. */
+.alike > .lessoncard, .alike > .examplecard { margin: 8px 0 0 20px; }
+.alike > .lessoncard:last-child, .alike > .examplecard:last-child { margin-bottom: 8px; }
+
+.lessoncard {
+  background: var(--white); border: 1px solid var(--line); border-radius: var(--r-md);
+  padding: 14px 16px; margin-bottom: 8px;
+  transition: border-color 0.12s, background 0.12s;
+}
+.lessoncard:hover { border-color: var(--edge); }
+.lessoncard.picked { border-color: var(--moss); background: var(--ok-face); }
+.lessoncard .check { align-items: flex-start; gap: 12px; }
+.lessoncard .body { display: block; flex: 1; min-width: 0; }
+
+/* An example is an exchange: the question quoted and quiet, the answer in the company's
+   own voice beneath it. */
+.lessoncard .asked {
+  margin: 0 0 8px; font-size: 13px; color: var(--smoke); font-style: italic;
+}
+.lessoncard .asked::before { content: '“'; }
+.lessoncard .asked::after { content: '”'; }
+.lessoncard .said {
+  margin: 0; font-size: 14px; line-height: 1.5; color: var(--ink); white-space: pre-wrap;
+  overflow-wrap: anywhere; border-left: 3px solid var(--moss); padding-left: 12px;
+}
+/* A fact is a claim, so the claim leads. */
+.lessoncard .claim {
+  margin: 0; font-size: 14.5px; font-weight: 500; line-height: 1.45; color: var(--ink);
+  overflow-wrap: anywhere;
+}
+/*
+ * When it happens, on a date card.
+ *
+ * The date is what the card is for, so it is the biggest thing on it. This used to reuse
+ * .factlabel - 10px, grey, uppercase, monospace - which is right for the topic of a fact and
+ * wrong here: it read as a caption, and the time pickers below ended up the most prominent
+ * controls on the row, so they were taken for the date fields.
+ */
+.lessoncard .whenline {
+  margin: 0 0 5px; font-size: 16.5px; font-weight: 650; line-height: 1.3;
+  color: var(--ink); letter-spacing: -0.01em; font-variant-numeric: tabular-nums;
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+}
+/* A repeat is a qualifier on the date, so it sits beside it rather than competing with it. */
+.lessoncard .whenline .every {
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--smoke); background: var(--sand); border-radius: var(--r-sm); padding: 2px 7px;
+}
+/*
+ * Search-and-tick, used by both Manage dialogs on the admin page.
+ *
+ * Scrolls at a fixed height rather than growing the dialog: an instance with forty accounts
+ * would otherwise push the search box off the top of the screen, which is the one control
+ * that makes forty accounts manageable.
+ */
+.picklist { max-height: 46vh; overflow-y: auto; border-top: 1px solid var(--line); }
+/*
+ * A row of the list, not a form label — so it undoes what the base label rule assumes about
+ * one: block, 13px, grey and semi-bold is right above a field and wrong for a name you are
+ * picking from a list. label.check and label.switch do the same, for the same reason.
+ */
+.pickrow {
+  display: flex; align-items: center; gap: 10px; margin: 0; padding: 9px 2px;
+  border-bottom: 1px solid var(--line); cursor: pointer;
+  font-size: 14px; font-weight: 400; color: var(--ink);
+}
+.pickrow:hover { background: var(--sand); }
+/* A row that cannot be changed should not look pressable. */
+.pickrow:has(input:disabled) { cursor: default; background: none; }
+/*
+ * width:auto, because the rule at the top of this file gives every input width:100% — so a
+ * checkbox left alone eats the whole row and the name beside it wraps one letter per line.
+ * Same override label.check already carries, for the same reason.
+ */
+.pickrow input { width: auto; flex: none; margin: 0; accent-color: var(--ink); }
+.pickname { flex: 1; min-width: 0; overflow-wrap: anywhere; color: var(--ink); }
+/* Why the row is locked, kept on one line and never the thing that widens the dialog. */
+.pickrow .note { flex: none; white-space: nowrap; font-size: 12px; }
+/* What a fact is about, above what it says. */
+.lessoncard .factlabel {
+  margin: 0 0 3px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+  font-family: ui-monospace, SFMono-Regular, monospace; color: var(--smoke);
+}
+.lessoncard .nearest {
+  margin: 10px 0 0; padding: 9px 12px; border-radius: var(--r-sm); background: var(--sand);
+  font-size: 13px; color: var(--smoke); overflow-wrap: anywhere;
+}
+.lessoncard .nearest span {
+  display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+  font-family: ui-monospace, SFMono-Regular, monospace; margin-bottom: 3px;
+}
+.lessoncard .nearest.none { background: var(--ok-face); color: var(--ok-ink); }
+
+/* Where it came from, which is how "is this true" actually gets answered. */
+.lessoncard .foot {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px;
+  padding-top: 9px; border-top: 1px solid var(--line);
+}
+.lessoncard.picked .foot { border-top-color: rgba(0, 0, 0, 0.08); }
+.lessoncard .foot .pill { font-size: 11px; }
+.lessoncard .foot .note { margin: 0; }
+
+/* A file proposal: the file itself, then when it should be sent. */
+.lessoncard .proposedfile {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+  border: 1px solid var(--line); border-radius: var(--r-sm); padding: 8px 10px; background: var(--sand);
+}
+.lessoncard .proposedfile .filekind {
+  flex: none; display: grid; place-items: center; width: 38px; height: 38px; border-radius: var(--r-sm);
+  background: var(--ink); color: var(--white);
+  font-family: ui-monospace, SFMono-Regular, monospace; font-size: 10px; font-weight: 600;
+}
+.lessoncard .proposedfile b { display: block; font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.lessoncard .proposedfile small { display: block; font-size: 11px; color: var(--smoke); }
+
+/* Already in use: a list rather than cards. These are settled, and settled things should
+   not shout as loudly as decisions. */
+.lessonrow {
+  display: flex; align-items: flex-start; gap: 12px;
+  border-bottom: 1px solid var(--line); padding: 12px 2px;
+}
+.lessonrow:last-child { border-bottom: 0; }
+.lessonrow .body { flex: 1; min-width: 0; }
+.lessonrow .asked { margin: 0 0 3px; font-size: 13px; color: var(--smoke); font-style: italic; }
+.lessonrow .said { margin: 0; font-size: 13.5px; color: var(--ink); overflow-wrap: anywhere; }
+.lessonrow > button { flex: none; }
+/* A search hit inside an excerpt. Toned to the theme; the browser default is a highlighter. */
+.lessonrow mark { background: var(--warn-face); color: var(--warn-ink); padding: 0 1px; border-radius: 2px; }
+.lessonrow .factlabel {
+  margin: 0 0 3px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+  font-family: ui-monospace, SFMono-Regular, monospace; color: var(--smoke);
+}
+/* A settled file or link: same card as the proposal, at the size of a list row. */
+.lessonrow .proposedfile {
+  display: flex; align-items: center; gap: 9px; margin-bottom: 6px;
+}
+.lessonrow .proposedfile .filekind {
+  flex: none; display: grid; place-items: center; width: 30px; height: 30px; border-radius: var(--r-sm);
+  background: var(--ink); color: var(--white);
+  font-family: ui-monospace, SFMono-Regular, monospace; font-size: 9px; font-weight: 600;
+}
+.lessonrow .proposedfile b { display: block; font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.lessonrow .proposedfile small { display: block; font-size: 11px; color: var(--smoke); overflow-wrap: anywhere; }
+
+/*
+ * The queue, as a door rather than a pile.
+ *
+ * What a bot has learned is what somebody opens this page for; what it is waiting to be
+ * allowed to learn is a job, done in one sitting. So the job is one line with a count on
+ * it, and the whole review happens in a sheet over the top.
+ */
+.approvebar {
+  display: flex; align-items: center; gap: 14px; width: 100%; text-align: left;
+  background: var(--white); color: var(--ink); border: 1px solid var(--line); border-radius: var(--r-md);
+  padding: 14px 16px; cursor: pointer; transition: border-color 0.12s, box-shadow 0.12s;
+}
+.approvebar:disabled { cursor: default; opacity: 0.75; }
+.approvebar.waiting { border-color: var(--moss); box-shadow: 0 1px 3px rgba(23, 23, 23, 0.06); }
+.approvebar.waiting:hover { border-color: var(--ink); }
+.approvebar .count {
+  flex: none; display: grid; place-items: center; min-width: 34px; height: 34px; padding: 0 8px;
+  border-radius: var(--r-sm); background: var(--sand); color: var(--smoke);
+  font-size: 15px; font-weight: 600;
+}
+.approvebar.waiting .count { background: var(--moss); color: var(--white); }
+.approvebar > span:nth-child(2) { flex: 1; min-width: 0; }
+.approvebar strong { display: block; font-size: 14px; }
+.approvebar .note { margin: 2px 0 0; }
+.approvebar .go { flex: none; font-size: 13px; color: var(--moss); font-weight: 500; }
+
+/* Wide, because a proposal is a paragraph and a queue is judged by comparison. */
+dialog.sheet.reviewsheet { width: min(860px, calc(100vw - 40px)); }
+
+@media (prefers-reduced-motion: reduce) { progress:indeterminate { animation: none; } }
+
+.lessoncard .eventtimes { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.lessoncard .eventtimes label { display: grid; gap: 2px; margin: 0; }
+.timepick { width: auto; min-width: 108px; }
+.lessoncard .eventtimes .timepick { width: auto; padding: 5px 8px; font-size: 13px; }
+.lessoncard .eventtimes .calpick { width: auto; max-width: 180px; padding: 5px 8px; font-size: 13px; }
+.lessoncard .eventtimes > .note { flex: 1; min-width: 180px; margin: 0 0 4px; }
 
 /*
  * The passages sheet. A native <dialog>, so the backdrop, the focus trap and
@@ -1292,9 +1938,22 @@ dialog.sheet.wide { width: min(860px, calc(100vw - 40px)); }
  * row, when it is the one thing the control exists to say.
  */
 .attachpicker { display: grid; gap: 8px; }
-.attachpicker .attached { display: flex; flex-wrap: wrap; gap: 6px; }
-.attachpicker .attached .chip { display: inline-flex; align-items: center; gap: 6px; }
-.attachpicker .attachfind { font-size: 14px; padding: 7px 10px; }
+/*
+ * One search box, everywhere there is one.
+ *
+ * Six of these were hand-rolled with their own inline width and their own idea of the gap
+ * underneath, so a box above a list sat flush against it in one place and floated in another.
+ * The shape and the breathing room live here instead.
+ */
+.search, .attachfind {
+  font-size: 14px; padding: 8px 11px; width: 100%; max-width: 420px;
+}
+.search { display: block; margin: 14px 0; }
+/*
+ * Inside a row, the row owns both. A margin would push it out of line with whatever it sits
+ * beside, and a forced full width would fight the flex sizing it is there to share.
+ */
+.row > .search { margin: 0; width: auto; flex: 1 1 220px; }
 
 .pickfiles {
   display: grid; gap: 2px; max-height: 220px; overflow-y: auto;
@@ -1312,15 +1971,31 @@ dialog.sheet.wide { width: min(860px, calc(100vw - 40px)); }
 .pickfiles .filerow small { display: block; font-size: 12px; color: var(--smoke); overflow-wrap: anywhere; }
 .pickfiles .filerow .note { flex: none; font-variant-numeric: tabular-nums; }
 
-/* The same four characters in both places, so a chip and its row read as one thing. */
-.pickfiles .filerow .mark, .attachpicker .attached .chip .mark {
+/*
+ * The same four characters as the chips, so a row and a badge read as one thing.
+ *
+ * Three places want it now — the file picker, a Media card and the attach sheet — so they
+ * share the rule rather than each growing their own. Scoped rather than a bare .mark,
+ * because .chip.mark is a different thing with the same word in its name.
+ */
+.pickfiles .filerow .mark, .card > .row > .mark, .pick > .mark {
   flex: none; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 5px;
   background: var(--ink); color: var(--white);
   font-family: ui-monospace, SFMono-Regular, monospace; font-size: 9px; font-weight: 600;
 }
-.attachpicker .attached .chip .mark { width: 20px; height: 20px; font-size: 8px; }
-/* A chosen chip is ink already, so its mark inverts or it is a dark square on a dark pill. */
-.attachpicker .attached .chip.on .mark { background: var(--white); color: var(--ink); }
+/*
+ * And the picture that stands in for it when there is one, in the same slot so the card keeps
+ * its shape either way.
+ *
+ * Cropped square rather than left to its own aspect ratio: .cards is three fixed columns, and a
+ * portrait page next to a landscape one would make every row a different height. Anchored to
+ * the top because the top of a page is where the title is.
+ */
+.card > .row > .thumb {
+  flex: none; width: 64px; height: 64px; border-radius: 5px;
+  object-fit: cover; object-position: top;
+  background: var(--sand); border: 1px solid var(--line);
+}
 /* Inside a sheet the two source forms sit side by side only when there is room for both. */
 dialog.sheet .grid.two { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
 ol.passages { list-style: none; margin: 12px 0 0; padding: 0; }
@@ -1346,6 +2021,10 @@ ol.passages li p {
 @media (min-width: 861px) { .navscrim { display: none; } }
 
 @media (max-width: 860px) {
+  /* Written main.marketing, not a bare .marketing: the desktop rule is (0,1,1) and a bare
+     class would lose to it, so the padding would silently never change. */
+  main.marketing { padding: 40px 16px 60px; }
+  .marketing > section + section { margin-top: 44px; }
   .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .topbar {
     display: flex; align-items: center; gap: 12px;
@@ -1460,7 +2139,13 @@ const NAV = [
   // What decides how a question gets answered: the bot, and what it is allowed to read.
   { sect: 'Answering' },
   { to: '/chatbots', label: 'Chatbots', mark: 'chatbots' },
+  // Directly under the bots, because it is what you do to one rather than a place of its own:
+  // talk to it and find out whether what it learned is what you meant.
+  { to: '/playground', label: 'Playground', mark: 'playground' },
   { to: '/knowledge', label: 'Knowledge', mark: 'knowledge' },
+  // Beside Knowledge rather than under Setup: both answer “what does this workspace hold”,
+  // and Media is reached while composing something rather than while configuring it.
+  { to: '/media', label: 'Media', mark: 'media' },
   // Done once, then rarely.
   { sect: 'Setup' },
   { to: '/connectors', label: 'Connectors', mark: 'connectors' },
@@ -1507,9 +2192,9 @@ function Loading() {
 function RootDocument({ children, session }: Readonly<{ children: ReactNode; session: Me }>) {
   const location = useLocation()
   const nav = visibleNav()
-  // The landing page sets its own full-width layout, so it never wants the app frame
-  // around it — being signed in does not change that.
-  const bare = !session || location.pathname === '/'
+  // Signed out there is one page, and it sets its own layout: the sign-in card is centred on
+  // an empty screen rather than wrapped in a frame whose nav goes nowhere.
+  const bare = !session
   const [menu, setMenu] = useState(false)
   const close = () => setMenu(false)
 

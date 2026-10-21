@@ -17,6 +17,8 @@ import { Route as ContactsRouteImport } from './routes/contacts'
 import { Route as InboxRouteImport } from './routes/inbox'
 import { Route as KnowledgeRouteImport } from './routes/knowledge'
 import { Route as LoginRouteImport } from './routes/login'
+import { Route as MediaRouteImport } from './routes/media'
+import { Route as PlaygroundRouteImport } from './routes/playground'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as ApiChatRouteImport } from './routes/api.chat'
 import { Route as ApiWidgetDotjsRouteImport } from './routes/api.widget[.]js'
@@ -25,10 +27,12 @@ import { Route as ChatbotIdRouteImport } from './routes/chatbot.$id'
 import { Route as ChatbotNewRouteImport } from './routes/chatbot.new'
 import { Route as ContactIdRouteImport } from './routes/contact.$id'
 import { Route as KnowledgeIdRouteImport } from './routes/knowledge_.$id'
+import { Route as PlaygroundIdRouteImport } from './routes/playground_.$id'
 import { Route as ApiAttachmentIdRouteImport } from './routes/api.attachment.$id'
 import { Route as ApiOauthProviderRouteImport } from './routes/api.oauth.$provider'
 import { Route as ApiResourceTokenRouteImport } from './routes/api.resource.$token'
 import { Route as ApiTelegramIdRouteImport } from './routes/api.telegram.$id'
+import { Route as ApiThumbTokenRouteImport } from './routes/api.thumb.$token'
 import { Route as ApiUploadIdRouteImport } from './routes/api.upload.$id'
 
 const IndexRoute = IndexRouteImport.update({
@@ -71,6 +75,16 @@ const LoginRoute = LoginRouteImport.update({
   path: '/login',
   getParentRoute: () => rootRouteImport,
 } as any)
+const MediaRoute = MediaRouteImport.update({
+  id: '/media',
+  path: '/media',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PlaygroundRoute = PlaygroundRouteImport.update({
+  id: '/playground',
+  path: '/playground',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SettingsRoute = SettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
@@ -111,6 +125,11 @@ const KnowledgeIdRoute = KnowledgeIdRouteImport.update({
   path: '/knowledge/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PlaygroundIdRoute = PlaygroundIdRouteImport.update({
+  id: '/playground_/$id',
+  path: '/playground/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiAttachmentIdRoute = ApiAttachmentIdRouteImport.update({
   id: '/api/attachment/$id',
   path: '/api/attachment/$id',
@@ -131,6 +150,11 @@ const ApiTelegramIdRoute = ApiTelegramIdRouteImport.update({
   path: '/api/telegram/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiThumbTokenRoute = ApiThumbTokenRouteImport.update({
+  id: '/api/thumb/$token',
+  path: '/api/thumb/$token',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiUploadIdRoute = ApiUploadIdRouteImport.update({
   id: '/api/upload/$id',
   path: '/api/upload/$id',
@@ -146,6 +170,8 @@ export interface FileRoutesByFullPath {
   '/inbox': typeof InboxRoute
   '/knowledge': typeof KnowledgeRoute
   '/login': typeof LoginRoute
+  '/media': typeof MediaRoute
+  '/playground': typeof PlaygroundRoute
   '/settings': typeof SettingsRoute
   '/api/chat': typeof ApiChatRoute
   '/api/widget.js': typeof ApiWidgetDotjsRoute
@@ -154,10 +180,12 @@ export interface FileRoutesByFullPath {
   '/chatbot/new': typeof ChatbotNewRoute
   '/contact/$id': typeof ContactIdRoute
   '/knowledge/$id': typeof KnowledgeIdRoute
+  '/playground/$id': typeof PlaygroundIdRoute
   '/api/attachment/$id': typeof ApiAttachmentIdRoute
   '/api/oauth/$provider': typeof ApiOauthProviderRoute
   '/api/resource/$token': typeof ApiResourceTokenRoute
   '/api/telegram/$id': typeof ApiTelegramIdRoute
+  '/api/thumb/$token': typeof ApiThumbTokenRoute
   '/api/upload/$id': typeof ApiUploadIdRoute
 }
 export interface FileRoutesByTo {
@@ -169,6 +197,8 @@ export interface FileRoutesByTo {
   '/inbox': typeof InboxRoute
   '/knowledge': typeof KnowledgeRoute
   '/login': typeof LoginRoute
+  '/media': typeof MediaRoute
+  '/playground': typeof PlaygroundRoute
   '/settings': typeof SettingsRoute
   '/api/chat': typeof ApiChatRoute
   '/api/widget.js': typeof ApiWidgetDotjsRoute
@@ -177,10 +207,12 @@ export interface FileRoutesByTo {
   '/chatbot/new': typeof ChatbotNewRoute
   '/contact/$id': typeof ContactIdRoute
   '/knowledge/$id': typeof KnowledgeIdRoute
+  '/playground/$id': typeof PlaygroundIdRoute
   '/api/attachment/$id': typeof ApiAttachmentIdRoute
   '/api/oauth/$provider': typeof ApiOauthProviderRoute
   '/api/resource/$token': typeof ApiResourceTokenRoute
   '/api/telegram/$id': typeof ApiTelegramIdRoute
+  '/api/thumb/$token': typeof ApiThumbTokenRoute
   '/api/upload/$id': typeof ApiUploadIdRoute
 }
 export interface FileRoutesById {
@@ -193,6 +225,8 @@ export interface FileRoutesById {
   '/inbox': typeof InboxRoute
   '/knowledge': typeof KnowledgeRoute
   '/login': typeof LoginRoute
+  '/media': typeof MediaRoute
+  '/playground': typeof PlaygroundRoute
   '/settings': typeof SettingsRoute
   '/api/chat': typeof ApiChatRoute
   '/api/widget.js': typeof ApiWidgetDotjsRoute
@@ -201,10 +235,12 @@ export interface FileRoutesById {
   '/chatbot/new': typeof ChatbotNewRoute
   '/contact/$id': typeof ContactIdRoute
   '/knowledge_/$id': typeof KnowledgeIdRoute
+  '/playground_/$id': typeof PlaygroundIdRoute
   '/api/attachment/$id': typeof ApiAttachmentIdRoute
   '/api/oauth/$provider': typeof ApiOauthProviderRoute
   '/api/resource/$token': typeof ApiResourceTokenRoute
   '/api/telegram/$id': typeof ApiTelegramIdRoute
+  '/api/thumb/$token': typeof ApiThumbTokenRoute
   '/api/upload/$id': typeof ApiUploadIdRoute
 }
 export interface FileRouteTypes {
@@ -218,6 +254,8 @@ export interface FileRouteTypes {
     | '/inbox'
     | '/knowledge'
     | '/login'
+    | '/media'
+    | '/playground'
     | '/settings'
     | '/api/chat'
     | '/api/widget.js'
@@ -226,10 +264,12 @@ export interface FileRouteTypes {
     | '/chatbot/new'
     | '/contact/$id'
     | '/knowledge/$id'
+    | '/playground/$id'
     | '/api/attachment/$id'
     | '/api/oauth/$provider'
     | '/api/resource/$token'
     | '/api/telegram/$id'
+    | '/api/thumb/$token'
     | '/api/upload/$id'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -241,6 +281,8 @@ export interface FileRouteTypes {
     | '/inbox'
     | '/knowledge'
     | '/login'
+    | '/media'
+    | '/playground'
     | '/settings'
     | '/api/chat'
     | '/api/widget.js'
@@ -249,10 +291,12 @@ export interface FileRouteTypes {
     | '/chatbot/new'
     | '/contact/$id'
     | '/knowledge/$id'
+    | '/playground/$id'
     | '/api/attachment/$id'
     | '/api/oauth/$provider'
     | '/api/resource/$token'
     | '/api/telegram/$id'
+    | '/api/thumb/$token'
     | '/api/upload/$id'
   id:
     | '__root__'
@@ -264,6 +308,8 @@ export interface FileRouteTypes {
     | '/inbox'
     | '/knowledge'
     | '/login'
+    | '/media'
+    | '/playground'
     | '/settings'
     | '/api/chat'
     | '/api/widget.js'
@@ -272,10 +318,12 @@ export interface FileRouteTypes {
     | '/chatbot/new'
     | '/contact/$id'
     | '/knowledge_/$id'
+    | '/playground_/$id'
     | '/api/attachment/$id'
     | '/api/oauth/$provider'
     | '/api/resource/$token'
     | '/api/telegram/$id'
+    | '/api/thumb/$token'
     | '/api/upload/$id'
   fileRoutesById: FileRoutesById
 }
@@ -288,6 +336,8 @@ export interface RootRouteChildren {
   InboxRoute: typeof InboxRoute
   KnowledgeRoute: typeof KnowledgeRoute
   LoginRoute: typeof LoginRoute
+  MediaRoute: typeof MediaRoute
+  PlaygroundRoute: typeof PlaygroundRoute
   SettingsRoute: typeof SettingsRoute
   ApiChatRoute: typeof ApiChatRoute
   ApiWidgetDotjsRoute: typeof ApiWidgetDotjsRoute
@@ -296,10 +346,12 @@ export interface RootRouteChildren {
   ChatbotNewRoute: typeof ChatbotNewRoute
   ContactIdRoute: typeof ContactIdRoute
   KnowledgeIdRoute: typeof KnowledgeIdRoute
+  PlaygroundIdRoute: typeof PlaygroundIdRoute
   ApiAttachmentIdRoute: typeof ApiAttachmentIdRoute
   ApiOauthProviderRoute: typeof ApiOauthProviderRoute
   ApiResourceTokenRoute: typeof ApiResourceTokenRoute
   ApiTelegramIdRoute: typeof ApiTelegramIdRoute
+  ApiThumbTokenRoute: typeof ApiThumbTokenRoute
   ApiUploadIdRoute: typeof ApiUploadIdRoute
 }
 
@@ -361,6 +413,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/media': {
+      id: '/media'
+      path: '/media'
+      fullPath: '/media'
+      preLoaderRoute: typeof MediaRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/playground': {
+      id: '/playground'
+      path: '/playground'
+      fullPath: '/playground'
+      preLoaderRoute: typeof PlaygroundRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/settings': {
       id: '/settings'
       path: '/settings'
@@ -417,6 +483,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof KnowledgeIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/playground_/$id': {
+      id: '/playground_/$id'
+      path: '/playground/$id'
+      fullPath: '/playground/$id'
+      preLoaderRoute: typeof PlaygroundIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/attachment/$id': {
       id: '/api/attachment/$id'
       path: '/api/attachment/$id'
@@ -445,6 +518,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiTelegramIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/thumb/$token': {
+      id: '/api/thumb/$token'
+      path: '/api/thumb/$token'
+      fullPath: '/api/thumb/$token'
+      preLoaderRoute: typeof ApiThumbTokenRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/upload/$id': {
       id: '/api/upload/$id'
       path: '/api/upload/$id'
@@ -464,6 +544,8 @@ const rootRouteChildren: RootRouteChildren = {
   InboxRoute: InboxRoute,
   KnowledgeRoute: KnowledgeRoute,
   LoginRoute: LoginRoute,
+  MediaRoute: MediaRoute,
+  PlaygroundRoute: PlaygroundRoute,
   SettingsRoute: SettingsRoute,
   ApiChatRoute: ApiChatRoute,
   ApiWidgetDotjsRoute: ApiWidgetDotjsRoute,
@@ -472,10 +554,12 @@ const rootRouteChildren: RootRouteChildren = {
   ChatbotNewRoute: ChatbotNewRoute,
   ContactIdRoute: ContactIdRoute,
   KnowledgeIdRoute: KnowledgeIdRoute,
+  PlaygroundIdRoute: PlaygroundIdRoute,
   ApiAttachmentIdRoute: ApiAttachmentIdRoute,
   ApiOauthProviderRoute: ApiOauthProviderRoute,
   ApiResourceTokenRoute: ApiResourceTokenRoute,
   ApiTelegramIdRoute: ApiTelegramIdRoute,
+  ApiThumbTokenRoute: ApiThumbTokenRoute,
   ApiUploadIdRoute: ApiUploadIdRoute,
 }
 export const routeTree = rootRouteImport

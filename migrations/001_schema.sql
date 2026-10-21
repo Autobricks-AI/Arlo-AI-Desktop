@@ -20,7 +20,7 @@ declare
   parts text[];
   n_parts int;
 begin
-  -- A nickname in brackets belongs to neither half: "Kar Wei (Kary) Loh" is Kar Wei Loh.
+  -- A nickname in brackets belongs to neither half: "Mei Ling (May) Tan" is Mei Ling Tan.
   n := btrim(regexp_replace(coalesce(raw, ''), '\([^)]*\)', ' ', 'g'));
   n := btrim(regexp_replace(n, '\s+', ' ', 'g'));
 
@@ -35,7 +35,7 @@ begin
     return array[null, null]::text[];
   end if;
 
-  -- "Loh, Kar Wei": the one form that says outright which half is the family name.
+  -- "Tan, Mei Ling": the one form that says outright which half is the family name.
   if position(',' in n) > 0 then
     return array[nullif(btrim(split_part(n, ',', 2)), ''), nullif(btrim(split_part(n, ',', 1)), '')];
   end if;

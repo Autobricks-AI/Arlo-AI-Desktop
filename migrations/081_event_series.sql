@@ -1,0 +1,37 @@
+-- The rows that were entered as one course.
+--
+-- ---------------------------------------------------------------- what prompted it
+--
+-- A course meeting on three days is three rows sharing a title, because there is no course
+-- entity -- 043 decided that, and it is still the right call. What was missing was any way to
+-- enter one: the only form offered From and To, so people entered a range, and a range means
+-- every day between. One live row reads 2026-10-20 to 2026-10-27 for a course the team described
+-- as "Dates: 20, 22, 27 October" -- eight days claimed, three of them real, five with a class on
+-- them that nobody is teaching.
+--
+-- Fixing the form is most of the work. This column is what lets the rows it creates be edited
+-- afterwards as the one thing they are.
+--
+-- ---------------------------------------------------------------- why not just match on title
+--
+-- Same calendar, same flattened title, same hours would group them, and on the workspace this was
+-- written for it even gets the right answer: three September rows, one course. It is still wrong,
+-- and the counter-example is already a test -- "two intakes of one course, a fortnight apart, are
+-- two dates however alike they read" (test/catalogue.test.js). Two October intakes at the same
+-- hours would read as one six-day course, and then taking a date off in the editor would delete
+-- the other intake's rows. A gap rule does not separate them either: one ends on the 16th and the
+-- next starts on the 20th.
+--
+-- So the fact is recorded when the rows are made rather than guessed afterwards. A token, not a
+-- foreign key: the group has no row of its own to point at, and a self-reference would orphan the
+-- rest the moment somebody removed the first day.
+--
+-- ---------------------------------------------------------------- deliberately not retroactive
+--
+-- Null on everything that exists today, and nothing backfills it. A row with no series behaves
+-- exactly as it does now -- you edit that one day -- because the guess that would fill this column
+-- in is the same guess that merges two intakes.
+alter table events add column if not exists series text;
+
+-- Only ever read as "the other rows of this one", so the lookup is per workspace and per token.
+create index if not exists events_series on events (workspace_id, series) where series is not null;

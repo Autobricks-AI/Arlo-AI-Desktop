@@ -1,0 +1,24 @@
+-- Arlo answering one conversation, while it still watches every other one.
+--
+-- A bot in draft or learning mode never replies to a customer, which is the point of both
+-- modes -- and it left no way to watch it answer with everything it has learned without
+-- committing to it answering everybody. `handBack` says so itself: going live "changes what
+-- this bot does on every channel it answers, not just on the thread somebody is looking at",
+-- so testing meant flipping the whole bot, watching one thread, and remembering to put it
+-- back, with every other customer answered live in between.
+--
+-- ---------------------------------------------------------------- why here and not on bots
+--
+-- `status` and `assignee` were the whole of a conversation's state, and neither can say this:
+-- `status = 'bot'` means the bot holds the thread, which draft and learning modes are happy to
+-- be while still saying nothing. This is the narrower question underneath -- when this thread's
+-- turn comes, does the answer go out.
+--
+-- A boolean rather than a mode of its own. `bots.model` is the shape being followed, where the
+-- narrow setting overrides the wider one, except that there is only one override anybody wants:
+-- answer here. A per-conversation 'paused' would be `status`, which already exists.
+--
+-- Nothing expires it. It is turned off in the inbox, or by a person taking the thread over --
+-- which is also why the reply gate keeps checking `assignee` first: somebody claiming a
+-- conversation beats a switch left on behind them.
+alter table conversations add column if not exists answers_live boolean not null default false;

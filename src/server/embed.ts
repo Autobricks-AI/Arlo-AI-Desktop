@@ -121,6 +121,24 @@ export async function embed(texts: string[]): Promise<number[][] | null> {
 }
 
 /**
+ * The text a lesson is embedded as. One definition, because three places write these vectors
+ * -- harvesting, editing, and the backfill below -- and they had drifted: an edited example
+ * was embedded as its question, a harvested one as question and answer, and the two kinds of
+ * vector sat side by side in one index.
+ *
+ * An example is its question alone. What a customer types is compared with what other
+ * customers asked, never with the wording of our replies, and measured through the provider
+ * this build uses the answer only gets in the way: "do you ship to ireland" sits 0.082 from
+ * the question by itself and 0.271 once the answer is added, while a bare "hi" moves *closer*
+ * to an answer that happens to open with "Hi". The same mistake the keyword path made with
+ * `tsv`, made again in vectors.
+ *
+ * A fact keeps its label with its text, because both are what the fact is about.
+ */
+export const lessonText = (l: { kind: string; question: string | null; answer: string }) =>
+  l.kind === 'example' ? (l.question ?? '') : `${l.question ?? ''}\n${l.answer}`
+
+/**
  * pgvector's text form. `pg` has no idea what a vector is — it is an extension type with
  * an OID assigned at install time — so it goes over the wire as a string and Postgres
  * casts it. One place that knows the format, rather than a template literal per query.
@@ -173,15 +191,15 @@ export async function sweepEmbeddings() {
      * description at answer time, not by similarity, and it has no embedding to be missing.
      */
     const lessons = await asSystem(() =>
-      all<{ id: number; question: string | null; answer: string }>(
-        `SELECT id, question, answer FROM lessons
+      all<{ id: number; kind: string; question: string | null; answer: string }>(
+        `SELECT id, kind, question, answer FROM lessons
           WHERE embedding IS NULL AND kind <> 'resource' AND status <> 'rejected'
           ORDER BY id LIMIT ?`,
         BACKFILL,
       ),
     )
     if (lessons.length) {
-      const vectors = await embed(lessons.map((l) => `${l.question ?? ''}\n${l.answer}`))
+      const vectors = await embed(lessons.map(lessonText))
       if (vectors)
         await asSystem(async () => {
           for (const [i, l] of lessons.entries())

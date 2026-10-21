@@ -162,7 +162,13 @@ export const Route = createFileRoute('/api/widget.js')({
         // same host it was loaded from — behind a proxy that is not what this process sees.
         const forwarded = request.headers.get('x-forwarded-proto')?.split(',')[0].trim()
         const url = new URL(request.url)
-        const origin = process.env.PUBLIC_URL || `${forwarded ?? url.protocol.slice(0, -1)}://${url.host}`
+        /*
+ * `||`, not `??`. An empty `x-forwarded-proto` is not nullish, so `??` kept it and built
+ * `://host` — not a URL — and every embedded widget silently failed to initialise. nginx
+ * sends exactly that when configured as `proxy_set_header X-Forwarded-Proto $http_x_...`
+ * and the inbound request had no such header. auth.ts:408 already gets this right.
+ */
+        const origin = process.env.PUBLIC_URL || `${forwarded || url.protocol.slice(0, -1)}://${url.host}`
 
         return new Response(script(origin.replace(/\/+$/, '')), {
           headers: {

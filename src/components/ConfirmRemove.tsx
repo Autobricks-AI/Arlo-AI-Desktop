@@ -6,9 +6,9 @@ import { Modal } from './Modal'
  *
  * Every connector's remove button lands here, because every one of them means the same two
  * things and they pull in opposite directions: the threads that arrived on this connection
- * are destroyed, and the training already approved from them is not. A `window.confirm` can
- * hold one fact well and two badly, and the second fact is the one that stops somebody
- * believing they are about to lose the work.
+ * are destroyed, along with the board cards judged from them, and the training already
+ * approved from them is not. A `window.confirm` can hold one fact well and two badly, and
+ * the second fact is the one that stops somebody believing they are about to lose the work.
  *
  * Order is deliberate. The warning is first because it is the decision, and the reassurance
  * is second because it is what somebody reads last before choosing.
@@ -40,6 +40,16 @@ export function ConfirmRemove({
       <div className="tip" style={{ marginTop: 0 }}>
         <strong>Its conversations are deleted</strong>
         <p>{takes}</p>
+        {/*
+          Said separately from `takes`, because it is the same sentence for every connector
+          and it is the one somebody does not expect. A card is a judgement read off a
+          transcript — which column, why, what they wanted, what they said about price — and
+          once the transcript is gone there is nothing left to check it against.
+        */}
+        <p>
+          Anybody left with no conversation at all comes off the project boards, with whatever was worked out
+          about them there. Somebody who also wrote in on another channel keeps their card.
+        </p>
       </div>
       <div className="tip">
         <strong>Training already approved is kept</strong>

@@ -36,6 +36,25 @@ export const REPLY: Limit = { max: 60, windowMs: 60_000 }
 export const REGISTER: Limit = { max: 5, windowMs: 15 * 60_000 }
 
 /**
+ * Joining the waitlist, per address. Nobody puts the same address down four times in a
+ * quarter of an hour, and this is the bucket that stops one entry being replayed until its
+ * `seen_count` means nothing.
+ */
+export const WAITLIST: Limit = { max: 3, windowMs: 15 * 60_000 }
+
+/**
+ * The same form, per caller — and a different number, which is why it is a second constant
+ * rather than REGISTER's one used twice.
+ *
+ * REGISTER gets away with sharing a limit because both of its buckets mean "one person,
+ * once". This one does not: an office behind one NAT is many honest people at one address,
+ * and a launch is exactly when several of them turn up in the same hour. Loose enough to
+ * survive that, tight enough that a script filling the table is throttled long before an
+ * administrator has to look at it.
+ */
+export const WAITLIST_CALLER: Limit = { max: 20, windowMs: 60 * 60_000 }
+
+/**
  * Count one attempt against `key`. Returns how long to wait, or 0 when it is allowed.
  *
  * The whole thing is one statement on purpose. Read-then-write would let two workers both
@@ -90,11 +109,11 @@ export const reset = async () => {
  * all — every request would share one bucket and the first ten sign-ins of the day would
  * lock out the eleventh person.
  *
- * `cf-connecting-ip` comes first because in production traefik **replaces**
- * `x-forwarded-for` with its own address on the way in, so by the time it reaches this
- * process that header says `10.42.0.1` for everybody. Cloudflare's own header is the only
- * one still carrying the client. The other two are for running behind an ordinary proxy,
- * or none.
+ * `cf-connecting-ip` comes first because some reverse proxies **replace**
+ * `x-forwarded-for` with their own address on the way in, so by the time it reaches this
+ * process that header reads as one private address for everybody. Cloudflare's own header is
+ * the only one still carrying the client. The other two are for running behind an ordinary
+ * proxy, or none.
  *
  * Trusting a header at all is only safe because nothing reaches this process except
  * through the proxy — the app binds a private address. Exposed directly, any of these can

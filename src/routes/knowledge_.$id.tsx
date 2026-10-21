@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { Link, createFileRoute, useRouter } from '@tanstack/react-router'
 import { createServerFn, useServerFn } from '@tanstack/react-start'
 import { NotFound } from '../components/NotFound'
 import { requireSession } from '../server/auth'
 import * as bases from '../server/bases'
-import { getDocument, listDocuments, passagesOf, reindex, removeDocument, removePassage, saveNote, saveText, stats } from '../server/kb'
+import { findPassages, getDocument, listDocuments, passagesOf, reindex, removeDocument, removePassage, saveNote, saveText, stats } from '../server/kb'
 import { configured } from '../server/embed'
 import * as sites from '../server/sites'
 import * as uploads from '../server/uploads'
@@ -192,6 +192,18 @@ const saveDocText = createServerFn({ method: 'POST' })
     }
   })
 
+/**
+ * Where in this base does it say that?
+ *
+ * The question that follows a bot saying something surprising. It used to be unanswerable
+ * without opening pages one at a time: a bot offered a course that had been discontinued, and
+ * finding the sentence meant reading nineteen crawled pages by hand. Each hit names its page
+ * and opens straight into the editor, so finding it and fixing it are the same trip.
+ */
+const findText = createServerFn({ method: 'POST' })
+  .validator((d: { baseId: number; q: string }) => d)
+  .handler(async ({ data }) => findPassages((await requireSession()).workspaceId, data.baseId, data.q))
+
 /** The three ways in, as the three lists. Same order as the Add a source sheet. */
 const VIEWS = [
   { id: 'written', label: 'Written here' },
@@ -260,6 +272,38 @@ function KnowledgeView({ data }: { data: Data }) {
   const [noteText, setNoteText] = useState('')
   const [viewing, setViewing] = useState<Viewable | null>(null)
   const filePicker = useRef<HTMLInputElement>(null)
+
+  /*
+   * The box holds what you typed; `searched` holds what was asked for.
+   *
+   * Two things, because a keystroke costs a round trip. A quarter of a second after you stop
+   * typing, same as the contacts search. `found === null` while a query is in flight is what
+   * makes the panel say "searching" instead of flashing the previous answer under the new
+   * query -- the wrong hits under the right words is worse than a pause.
+   */
+  const [typed, setTyped] = useState('')
+  const [searched, setSearched] = useState('')
+  const [found, setFound] = useState<Awaited<ReturnType<typeof findText>> | null>(null)
+  const findFn = useServerFn(findText)
+
+  useEffect(() => {
+    const t = setTimeout(() => setSearched(typed.trim()), 250)
+    return () => clearTimeout(t)
+  }, [typed])
+
+  useEffect(() => {
+    if (searched.length < 2) return
+    let live = true
+    setFound(null)
+    void findFn({ data: { baseId: data.base.id, q: searched } })
+      .then((r) => live && setFound(r))
+      .catch(() => live && setFound({ hits: [], more: false }))
+    // Cancelled on the next query so a slow search cannot land on top of a fast later one.
+    return () => {
+      live = false
+    }
+  }, [searched, data.base.id, findFn])
+
 
   /*
    * Poll while anything is crawling, and stop the moment nothing is.
@@ -544,6 +588,84 @@ function KnowledgeView({ data }: { data: Data }) {
         typed passages under those — and the three are not a sequence to read, they are three
         answers to "where did this come from".
       */}
+      {/*
+        Find the sentence, then fix it.
+
+        Search sits above the three lists rather than inside one, because the question it
+        answers does not know where the words are -- that is what it is for. A hit names its
+        page and opens the same editor the page's own Open button does, so correcting
+        something found here is one click, not a hunt back through the right tab.
+      */}
+      {(data.documents.length > 0 || typed) && (
+        <input
+          className="search"
+          aria-label="Search this knowledge base"
+          placeholder="Search for a word or phrase in here"
+          value={typed}
+          onChange={(e) => setTyped(e.target.value)}
+          style={{ marginBottom: 0 }}
+        />
+      )}
+
+      {searched.length >= 2 && (
+        <div className="card" style={{ marginTop: 12 }}>
+          {found === null ? (
+            <p className="note" style={{ margin: 0 }}>
+              Searching…
+            </p>
+          ) : found.hits.length === 0 ? (
+            <p className="note" style={{ margin: 0 }}>
+              Nothing in this base contains “{searched}”. Those exact characters, anywhere in a
+              passage or a page title — a bot can still paraphrase something it never says
+              word for word.
+            </p>
+          ) : (
+            <>
+              <p className="note" style={{ margin: '0 0 8px' }}>
+                {found.more
+                  ? `The first ${found.hits.length} passages containing “${searched}” — there are more.`
+                  : `${found.hits.length} passage${found.hits.length === 1 ? '' : 's'} contain “${searched}”.`}
+              </p>
+              {found.hits.map((h) => (
+                <div key={h.id} className="lessonrow">
+                  <span className="body">
+                    <p className="said">
+                      {h.title}
+                      {/*
+                        Which hits came out of a page somebody has corrected. Without it, the
+                        wording that looks wrong here may be wording already fixed somewhere
+                        else, and the obvious next move is to edit it twice.
+                      */}
+                      {h.edited_at && <span className="pill warn" style={{ marginLeft: 6 }}>edited by hand</span>}
+                    </p>
+                    <p className="note" style={{ margin: '2px 0 0' }}>
+                      passage {h.ord + 1}
+                      {h.uri && (
+                        <>
+                          {' · '}
+                          <a href={h.uri} target="_blank" rel="noreferrer">
+                            {h.uri}
+                          </a>
+                        </>
+                      )}
+                    </p>
+                    <p className="note" style={{ margin: '4px 0 0', color: 'var(--ink)' }}>
+                      {highlight(h.excerpt, searched)}
+                    </p>
+                  </span>
+                  <button
+                    className="ghost small"
+                    onClick={() => setViewing({ id: h.document_id, title: h.title, uri: h.uri })}
+                  >
+                    Open
+                  </button>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      )}
+
       <div className="seg small" role="tablist" aria-label="What is in here" style={{ marginTop: 24 }}>
         {VIEWS.map((v) => (
           <button
@@ -651,6 +773,29 @@ function KnowledgeView({ data }: { data: Data }) {
   )
 }
 
+/**
+ * The searched words, marked, so a 220-character excerpt is scannable rather than readable.
+ *
+ * Index arithmetic rather than a regex: the needle is whatever somebody typed, and a regex
+ * built out of that reads their brackets and dots as syntax. `<mark>` because the browser
+ * already knows what a search hit looks like.
+ */
+function highlight(text: string, needle: string): ReactNode[] {
+  // indexOf('') is 0 for ever. The caller will not pass one, and this does not depend on that.
+  if (!needle) return [text]
+  const hay = text.toLowerCase()
+  const find = needle.toLowerCase()
+  const out: ReactNode[] = []
+  let at = 0
+  for (let i = hay.indexOf(find, at); i !== -1; i = hay.indexOf(find, at)) {
+    if (i > at) out.push(text.slice(at, i))
+    out.push(<mark key={i}>{text.slice(i, i + needle.length)}</mark>)
+    at = i + needle.length
+  }
+  out.push(text.slice(at))
+  return out
+}
+
 // ---------------------------------------------------------------- one site
 
 type Runner = (what: string, fn: () => Promise<unknown>) => Promise<void>
@@ -700,6 +845,24 @@ function SiteRow({
             </p>
           )}
 
+          {/*
+            Pages somebody has corrected by hand.
+
+            Standing, not only at the moment somebody reaches for Crawl again, because it says two
+            things and only one of them is about crawling. These pages no longer match the live
+            site -- which is the point when a site is wrong and cannot be fixed at source, and is
+            a quiet liability on a site that does change. Either way it is worth being able to see
+            without pressing anything.
+          */}
+          {site.edited > 0 && (
+            <p className="note warn" style={{ margin: '4px 0 0' }}>
+              {site.edited} page{site.edited === 1 ? '' : 's'} here{' '}
+              {site.edited === 1 ? 'has' : 'have'} been edited by hand and no longer match the live
+              site. {site.edited === 1 ? 'It' : 'They'} will not pick up changes to the website
+              until this is crawled again — and crawling again would undo the edits.
+            </p>
+          )}
+
           {/* The crawl itself died. Red, because nothing was filed and somebody must act. */}
           {site.error && <p className="note" style={{ color: 'var(--bad-ink)', margin: '4px 0 0' }}>{site.error}</p>}
 
@@ -733,7 +896,26 @@ function SiteRow({
           <button
             className="ghost small"
             disabled={working || !!busy}
-            onClick={() => run(`re-${site.id}`, () => recrawlFn({ data: { id: site.id, maxPages: limit } }))}
+            onClick={() => {
+              /*
+               * Only asks when there is something to lose. A confirm on every crawl is the
+               * cry-wolf failure that makes people click through the one that mattered.
+               */
+              if (
+                site.edited > 0 &&
+                !confirm(
+                  `${site.edited} page(s) on this site have been edited by hand.
+
+` +
+                    `Crawling again replaces them with whatever the live site says now, and those edits are lost.
+
+` +
+                    `Continue?`,
+                )
+              )
+                return
+              void run(`re-${site.id}`, () => recrawlFn({ data: { id: site.id, maxPages: limit } }))
+            }}
           >
             Crawl again
           </button>
@@ -741,7 +923,22 @@ function SiteRow({
             className="ghost small"
             disabled={!!busy}
             title="Removes the site and every page under it"
-            onClick={() => run(`rm-${site.id}`, () => dropFn({ data: site.id }))}
+            onClick={() => {
+              // The typed-note Remove already asks. This one takes far more and asked nothing.
+              if (
+                !confirm(
+                  `Remove ${site.root_url} and all ${site.pages} page(s) it brought in?` +
+                    (site.edited > 0 ? `
+
+${site.edited} of them have been edited by hand.` : '') +
+                    `
+
+This cannot be undone.`,
+                )
+              )
+                return
+              void run(`rm-${site.id}`, () => dropFn({ data: site.id }))
+            }}
           >
             Remove
           </button>
@@ -1068,6 +1265,10 @@ function DocRow({
             {doc.uri}
           </div>
         )}
+        {/* Which page, not merely that one of them was. The site row says how many. */}
+        {doc.edited_at && (
+          <div className="note warn">edited by hand — no longer what the page says</div>
+        )}
       </td>
       <td className="num">{doc.chunks}</td>
       <td className="note">{new Date(doc.updated_at).toLocaleString()}</td>
@@ -1223,7 +1424,7 @@ function PassagesModal({ doc, onClose }: { doc: Viewable; onClose: () => void })
               <p className="note" style={{ marginTop: 0 }}>
                 {rows.length} passage(s) · {rows.filter((r) => r.embedded).length} with a vector. This is what
                 retrieval searches, and it is rebuilt from the text above. Removing one cuts it out of
-                that text, so it stays gone through the next reindex.
+                that text, so it survives a reindex — but a fresh crawl of the page would bring it back.
               </p>
               <ol className="passages">
                 {rows.map((p) => (
@@ -1243,7 +1444,13 @@ function PassagesModal({ doc, onClose }: { doc: Viewable; onClose: () => void })
                             : 'Cut this passage out of the document'
                         }
                         onClick={() => {
-                          if (!confirm('Remove this passage? It is cut from the document text, so it stays gone.'))
+                          // Said precisely, because "stays gone" was true of a reindex and not of
+                          // a crawl, and somebody relying on the shorter promise would lose the edit.
+                          if (
+                            !confirm(
+                              'Remove this passage? It is cut from the document text, so it survives a reindex — but crawling this page again would bring it back.',
+                            )
+                          )
                             return
                           setCutting(p.id)
                           setErr('')

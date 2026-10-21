@@ -11,9 +11,10 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
-import { BOT_DEFAULTS, STANDARD_BASES, TOOLS, TOOL_IDS, calendarRange, shiftCalendar } from '../types'
+import { BOT_DEFAULTS, LESSONS_PAGE, STANDARD_BASES, TOOLS, TOOL_IDS, calendarRange, looksPersonal, looksStale, shiftCalendar, todayFor } from '../types'
 import type { BotMode, ChannelId, ToolId } from '../types'
-import { lightDismiss } from './Modal'
+import { Peek, lightDismiss } from './Modal'
+import { Pager } from './Pager'
 
 export type Draft = {
   name: string
@@ -30,7 +31,7 @@ export type Draft = {
   resourceIds: number[]
   tools: ToolId[]
   mode: BotMode
-  /** Whether it reads finished conversations for what the customer said about themselves. */
+  /** The one board this bot keeps. Null means it answers and moves nobody. */
   learns: boolean
   baseIds: number[]
   /** Calendars it may read. Empty means it knows no dates. */
@@ -79,7 +80,38 @@ const asDay = (iso: string) =>
 const asRange = (from: string, to?: string | null) =>
   to && to !== from ? asDay(from) + ' – ' + asDay(to) : asDay(from)
 
+/**
+ * Several days of one thing, written the way somebody would say them.
+ *
+ * "15, 17 & 18 Sept 2026" rather than three dates in full: the month and the year are the same
+ * for all of them, and repeating those is what made three class days need three cards.
+ */
+const asDays = (days: string[]) => {
+  const sorted = [...new Set(days)].sort()
+  if (sorted.length < 2) return sorted[0] ? asDay(sorted[0]) : ''
+  const last = sorted[sorted.length - 1]
+  // Only worth compressing when they share a month; across months each stands on its own.
+  const oneMonth = sorted.every((d) => d.slice(0, 7) === last.slice(0, 7))
+  if (!oneMonth) return sorted.map(asDay).join(', ')
+  const heads = sorted.slice(0, -1).map((d) => String(Number(d.slice(8))))
+  return `${heads.join(', ')} & ${asDay(last)}`
+}
+
 export type Options = {
+  /**
+   * Ask the server to work guardrails out from this bot's knowledge base.
+   *
+   * Passed in rather than imported, because this file is shared with the new-bot page where
+   * there is no bot to read a knowledge base for — and there it is simply absent.
+   */
+  /** The base this bot's approved facts are filed in. Null until the first one is approved. */
+  learnedBase?: { id: number; name: string; documents: number; passages: number } | null
+  /** Which resources are already attached to which approved example. */
+  lessonResources?: { lesson_id: number; id: number }[]
+  /** Correct an example's wording, and set the files that go out with it. */
+  onEditExample?: (input: { id: number; question: string; answer: string; resourceIds: number[] }) => Promise<void>
+  /** Turn down a proposed wording so it stops being offered. */
+  onDismissSuggestion?: (id: number) => Promise<void>
   bases: { id: number; name: string; description: string; documents: number; passages: number }[]
   connections: Connection[]
   /** Whether a model is reachable at all. A bot with nowhere to ask cannot answer. */
@@ -96,6 +128,8 @@ export type Options = {
     url: string | null
     mime: string | null
     size_bytes: number
+    /** How a file is fetched. Already public — it is the address customers are sent. */
+    token: string
     /** How many bots may send it. Deleting is workspace-wide, so this is worth showing. */
     bots: number
   }[]
@@ -133,29 +167,122 @@ export type Options = {
     repeats: string
     source: string
   }[]
+  /** Filling in the hour a learned date arrived without. */
+  onLessonTimes?: (input: { id: number; start_time?: string | null; end_time?: string | null }) => Promise<void>
   /** Saving a product or a date. Absent in the wizard, where the workspace has no bot yet. */
   onProduct?: (input: { id?: number; remove?: boolean; [k: string]: unknown }) => Promise<void>
   onEvent?: (input: { id?: number; remove?: boolean; [k: string]: unknown }) => Promise<void>
 
-  /** Answers written for this bot, newest first. Empty in the wizard. */
-  examples: { id: number; question: string; answer: string; created_at: string }[]
-  /** Which resource is attached to which answer. */
-  exampleResources: { lesson_id: number; id: number }[]
-  /** Absent on a page that cannot save — the wizard, before the bot exists. */
-  onAddExample?: (input: { question: string; answer: string; resourceIds: number[] }) => Promise<void>
-  onEditExample?: (input: { id: number; question: string; answer: string; resourceIds: number[] }) => Promise<void>
-  onRemoveExample?: (id: number) => Promise<void>
+  /**
+   * This bot's own training material: how much is waiting to be judged, and what is in use.
+   *
+   * Counts rather than the queue, because the queue is fetched a page at a time through
+   * `onQueue` once somebody opens the review door. Sending every proposal on every page load,
+   * and again after every approval, is most of the payload on a bot that has been running a
+   * while.
+   */
+  lessons: { counts: Record<string, number>; deployed: Lesson[] }
+  /** One page of the review queue, for the kind and search currently on screen. */
+  onQueue?: (q: { kind: string; find: string; page: number }) => Promise<{
+    rows: Lesson[]
+    matched: number
+    cards: number
+  }>
+  /** Approving is a decision about this bot, so it saves at once rather than on Save. */
+  onDecide?: (input: {
+    ids: number[]
+    status: 'approved' | 'rejected'
+    crossed?: { lesson: number; file: number }[]
+  }) => Promise<void>
+  /** Read this bot's conversations now. Returns how many proposals it found. */
+  onScan?: () => Promise<{ found: number; failed: number }>
+  /** Read a knowledge base for products, returning what it made of it. */
+  onReadCatalogue?: (baseId: number) => Promise<{ found: number; added: number; known: number; read: number; more: boolean }>
+}
+
+/** One thing a bot picked up from a conversation a person answered. */
+/**
+ * Near-copies folded under the one that leads them.
+ *
+ * `similar_to` points at another lesson that says the same thing, and the server only ever
+ * points at a row that leads a group itself -- so a leader is never also a follower and there
+ * is no chain to walk here. A row with no leader leads its own group of one.
+ *
+ * Order is the order the rows arrived in. A leader keeps the position it would have had and
+ * its followers move up beneath it, rather than staying where they were.
+ */
+function cluster(rows: Lesson[]) {
+  const out: { leader: Lesson; also: Lesson[] }[] = []
+  const seats = new Map<number, { leader: Lesson; also: Lesson[] }>()
+  // Two passes: a follower can appear before its leader in the list's order, and it has to
+  // find a seat that already exists.
+  for (const l of rows)
+    if (!l.similar_to) {
+      const seat = { leader: l, also: [] as Lesson[] }
+      seats.set(l.id, seat)
+      out.push(seat)
+    }
+  for (const l of rows) {
+    if (!l.similar_to) continue
+    const seat = seats.get(l.similar_to)
+    // A leader that is somehow not on screen would take its followers with it. Showing the row
+    // on its own is the harmless way to be wrong.
+    if (seat) seat.also.push(l)
+    else out.push({ leader: l, also: [] })
+  }
+  return out
+}
+
+export type Lesson = {
+  id: number
+  /** An older pending proposal that says nearly the same thing, when the server found one. */
+  similar_to?: number | null
+  /** A proposed rewrite waiting on a person. Empty when it was looked at and left alone. */
+  suggested?: string | null
+  suggested_question?: string | null
+  /** On a pending example: the files its conversation sent, which approving it will attach. */
+  will_send?: { id: number; title: string; status: string; attachment_id: number | null; mime: string | null }[] | null
+  kind: 'example' | 'fact' | 'resource' | 'event' | 'product' | 'contact'
+  question: string | null
+  answer: string
+  /** For a fact: the closest thing the knowledge base already says. */
+  nearest: string | null
+  /** The thread it came out of, so a reviewer can read it before deciding. */
+  conversation_id: number | null
+  created_at: string
+  /** For a date proposal: when it happens, and whether it comes round again. */
+  starts_on?: string | null
+  ends_on?: string | null
+  repeats?: string | null
+  /** HH:MM, or null when nobody has said what time yet. */
+  start_time?: string | null
+  end_time?: string | null
+  /** Which calendar it will be filed on, once somebody has chosen. */
+  calendar_id?: number | null
+  /** For a product proposal: what it costs, if the team said so. */
+  price?: number | null
+  currency?: string | null
+  unit?: string | null
+  /** For a file proposal: which file, and what it is. */
+  attachment_id: number | null
+  file_mime: string | null
+  file_size: number | null
+  /** For a contact proposal: whose card, which column, and what it says there now. */
+  customer_id?: number | null
+  field?: string | null
+  customer_name?: string | null
+  current?: string | null
 }
 
 export const SECTIONS = [
   { id: 'identity', label: 'Identity', hint: 'Name and what it should know about you' },
   { id: 'knowledge', label: 'Knowledge and attachments', hint: 'What it may answer from, and what it may send' },
   // Straight after Knowledge, because it is the same question asked twice: that section is
-  // what this bot may read, this one is what it has been told to say.
-  { id: 'answers', label: 'Answers and learning', hint: 'What to reply, and what it notes about customers' },
+  // what this bot may read, this one is what it learned from the people who answer for it.
+  { id: 'training', label: 'Training', hint: 'What it learned from your team' },
   // Where it answers and what it can do, together: both are "what this bot is wired to",
   // both are a list of checkboxes, and neither was ever a page's worth on its own.
-  { id: 'channels', label: 'Channels and tools', hint: 'Where it answers and what it can do' },
+  { id: 'channels', label: 'Channels and tools', hint: 'Where it answers, what it can do, whose board it fills' },
   { id: 'behaviour', label: 'Behaviour and guardrails', hint: 'Tone, limits and model' },
 ] as const
 
@@ -164,9 +291,9 @@ export type SectionId = (typeof SECTIONS)[number]['id']
 /**
  * What a fresh workspace's own defaults look like, if it still has them.
  *
- * Matched by name/flag rather than "whatever sorts first" — a workspace with several bases
- * by the time a second bot is made has no first one worth guessing at, and this is meant to
- * fill in the obvious starting point, not a guess.
+ * Matched by name/flag rather than "whatever sorts first" — a workspace with several
+ * projects or several bases by the time a second bot is made has no first one worth
+ * guessing at, and this is meant to fill in the obvious starting point, not a guess.
  */
 type Starters = {
   bases: { id: number; name: string }[]
@@ -181,6 +308,8 @@ export const emptyDraft = (starters?: Starters): Draft => ({
   memory: BOT_DEFAULTS.memory,
   persona: BOT_DEFAULTS.persona,
   model: '',
+  // The board every workspace starts with, if it is still called that — a bot pointed at a
+  // board somebody renamed or made a second one of would be a guess, not a default.
   confidence_floor: 0.45,
   strict_kb: true,
   escalate: BOT_DEFAULTS.escalate,
@@ -190,8 +319,6 @@ export const emptyDraft = (starters?: Starters): Draft => ({
   // that needs its own credential (web search) stays off until that is set up.
   tools: TOOL_IDS.filter((id) => TOOLS[id].needs === null),
   mode: BOT_DEFAULTS.mode,
-  // On by default, matching the column. It is the useful behaviour and it is visible in
-  // the form, which is what makes a default like this fair rather than sneaky.
   learns: true,
   // The one base every workspace starts with — not the other three STANDARD_BASES, which
   // stay an explicit choice.
@@ -306,7 +433,7 @@ function Split({ panes }: { panes: Pane[] }) {
 export function Section({ section, draft, set, options }: Props) {
   if (section === 'identity') return <Identity draft={draft} set={set} options={options} />
   if (section === 'knowledge') return <Knowledge draft={draft} set={set} options={options} />
-  if (section === 'answers') return <Answers draft={draft} set={set} options={options} />
+  if (section === 'training') return <Training draft={draft} set={set} options={options} />
   if (section === 'channels')
     return (
       <Split
@@ -327,6 +454,1009 @@ export function Section({ section, draft, set, options }: Props) {
       />
     )
   return <Behaviour draft={draft} set={set} options={options} />
+}
+
+// ---------------------------------------------------------------- training
+
+/**
+ * What this bot learned from the people who answered for it, and what it is using.
+ *
+ * Per bot, and that is not an implementation detail: a lesson came out of a conversation
+ * this bot was handling, in the words its own customers were given. A support bot's phrasing
+ * is not a sales bot's, and approving one for the wrong bot is how a sales bot starts
+ * sounding like a returns desk.
+ *
+ * Approving saves immediately rather than waiting for Save at the bottom of the page. It is
+ * a decision about a row, not an edit to a draft, and leaving ten approvals unsaved next to
+ * a Save button that is about the prompt is how somebody loses them.
+ */
+/**
+ * What the bot has learned, and what it wants permission to learn.
+ *
+ * This is a review queue before it is a settings page, and it was laid out as neither: one
+ * column of near-identical cards where the customer's question, the team's answer and the
+ * knowledge base's opinion were all the same size, and nothing said where any of it came
+ * from. A reviewer has one question per row — *is this true and should it be said again* —
+ * and answering it needs the source, the shape of the exchange, and a way to move on fast.
+ */
+function Training({ draft, set, options }: Fields) {
+  const [picked, setPicked] = useState<number[]>([])
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const [scanning, setScanning] = useState(false)
+  const [scanned, setScanned] = useState('')
+  const [showExamples, setShowExamples] = useState(false)
+  /*
+   * The queue is behind a door.
+   *
+   * What this bot has actually learned is the thing somebody opens this page to see, and it
+   * was underneath three groups of proposals nobody had judged yet — so the page read as a
+   * chore even when the queue was empty. Reviewing is a session of its own: it happens
+   * rarely, it wants the whole width, and it ends.
+   */
+  const [reviewing, setReviewing] = useState(false)
+
+  const { counts, deployed } = options.lessons
+  const waiting = Object.values(counts).reduce((n, c) => n + c, 0)
+
+  /*
+   * The queue, by kind, with what approving one actually does.
+   *
+   * Empty kinds are left out rather than shown as a nought: a tab you cannot open is a
+   * question about why not.
+   */
+  const KINDS = [
+    {
+      id: 'example',
+      label: 'Ways to answer',
+      blurb:
+        'Shown to the model when a similar question arrives. Shapes wording and length, not facts — those still come from the knowledge base.',
+    },
+    {
+      id: 'product',
+      label: 'Products',
+      blurb:
+        'Named by your team and not on the price list. Approving one adds it under Products and prices, where you can correct what it costs — and the bot quotes it from there.',
+    },
+    {
+      id: 'event',
+      label: 'Dates',
+      blurb:
+        'A closure, a launch or an event your team mentioned that is not on the calendar. Approving one puts it under Important dates. Nothing a customer said about their own booking reaches here.',
+    },
+    {
+      id: 'resource',
+      label: 'Files and links',
+      blurb:
+        "Something your team attached or linked to. Approving one adds it to this bot's resources, sent whole when a customer asks for what the line beneath it describes. Its own tick: approving the sentence that mentioned a file does not send the file.",
+    },
+    {
+      id: 'fact',
+      label: 'Facts',
+      blurb:
+        'Approving one files it in the knowledge base, where it can be quoted with a citation. Check it is true and still current — it was said once, in one conversation.',
+    },
+  ]
+
+  /*
+   * Which tab is open, remembered by kind rather than by position.
+   *
+   * Approving everything in one tab empties it and it disappears, so an index would land on
+   * whatever slid into its place. Falling back to the first remaining kind puts somebody on the
+   * next real thing to look at -- derived rather than stored, so the correction happens in the
+   * same render as the emptying instead of one fetch later.
+   */
+  const [kind, setKind] = useState('example')
+  const live = KINDS.filter((k) => (counts[k.id] ?? 0) > 0)
+  const open = live.some((k) => k.id === kind) ? kind : (live[0]?.id ?? 'example')
+
+  /*
+   * Narrowing the queue by what a proposal says.
+   *
+   * In SQL now rather than in the browser. A page holds twenty-five cards, and a box that
+   * searched only the rows it had been handed would be answering a narrower question than it
+   * looks like it answers -- the mistake contacts.tsx was fixed for. Debounced, so a keystroke
+   * is not a query.
+   */
+  const [find, setFind] = useState('')
+  const [term, setTerm] = useState('')
+  useEffect(() => {
+    const t = setTimeout(() => setTerm(find.trim()), 250)
+    return () => clearTimeout(t)
+  }, [find])
+
+  const [page, setPage] = useState(0)
+  /** Bumped to read the page again in place, after a decision or a scan. */
+  const [nonce, setNonce] = useState(0)
+  const [shown, setShown] = useState<{ rows: Lesson[]; matched: number; cards: number }>({
+    rows: [],
+    matched: 0,
+    cards: 0,
+  })
+
+  // A new kind or a new search starts at the top. Staying on page seven of a list that now has
+  // two is how a search looks broken.
+  useEffect(() => setPage(0), [open, term])
+
+  /*
+   * Changing a date's hours, then reading the page again.
+   *
+   * The loader is no longer invalidated for this -- it is the whole chatbot, which was thirteen
+   * seconds of work to show one changed time field. The queue is this component's own state, so
+   * re-reading it is the smaller and more honest refresh.
+   *
+   * ponytail: the hours are half of what makes two dates the same event, so the row leaves its
+   * group until the grouping sweep catches up a tick later. Recomputing it here would put that
+   * work back on somebody's click.
+   */
+  const onTimes =
+    options.onLessonTimes &&
+    (async (input: { id: number; start_time?: string | null; end_time?: string | null }) => {
+      await options.onLessonTimes!(input)
+      setNonce((n) => n + 1)
+    })
+
+  const ask = options.onQueue
+  useEffect(() => {
+    if (!ask) return
+    /*
+     * One answer at a time. Typing fast enough to overlap two reads would otherwise let the
+     * slower one land last and put an older page on screen.
+     */
+    let current = true
+    ask({ kind: open, find: term, page }).then((r) => {
+      if (current) setShown(r)
+    })
+    return () => {
+      current = false
+    }
+    /*
+     * `ask` is deliberately not a dependency. It is rebuilt on every render of the page that
+     * owns it, so including it here is an endless fetch -- and its identity never carries
+     * information, only its arguments do.
+     */
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, term, page, nonce])
+
+  const groups = live.map((k) => ({
+    ...k,
+    total: counts[k.id] ?? 0,
+    // Only the open tab has rows: the others are a count and a label until somebody asks.
+    rows: k.id === open ? cluster(shown.rows) : [],
+    matched: k.id === open ? shown.matched : (counts[k.id] ?? 0),
+  }))
+  const group = groups.find((g) => g.id === open) ?? groups[0]
+  /*
+   * What "select all" ticks: one per group, not one per card.
+   *
+   * This is the whole point of the folding. A queue of thirty-nine examples where a third are
+   * rewordings of each other used to be one click, and that click is how the near-copies got
+   * into the approved list in the first place. A follower is still approvable -- its own
+   * checkbox is right there under the disclosure -- but it has to be chosen.
+   *
+   * It follows the search for free, because group.rows is already the filtered clusters. That
+   * matters more than it looks: a Select all that reached rows the search was hiding would
+   * approve things nobody had seen, which is the failure the folding exists to prevent.
+   */
+  /*
+   * What one card stands for, and what ticking it decides.
+   *
+   * For most kinds a card is a row: tick the leader, approve the leader. A date is not -- a
+   * course meeting on the 15th, 17th and 18th is one decision that has to write three rows,
+   * and nine customers asking about it produced nine wordings of each. So a date group folds
+   * to its distinct days, oldest proposal of each, and the card carries all three.
+   */
+  const asOneCard = (leader: Lesson, also: Lesson[]) => {
+    if (leader.kind !== 'event') return { days: [] as Lesson[], ids: [leader.id] }
+    const byDay = new Map<string, Lesson>()
+    for (const l of [leader, ...also].sort((a, b) => a.id - b.id))
+      if (l.starts_on && !byDay.has(l.starts_on)) byDay.set(l.starts_on, l)
+    const days = [...byDay.values()].sort((a, b) => (a.starts_on! < b.starts_on! ? -1 : 1))
+    return { days, ids: days.length ? days.map((d) => d.id) : [leader.id] }
+  }
+
+  const here = group?.rows.flatMap((r) => asOneCard(r.leader, r.also).ids) ?? []
+
+  // The same three kinds again, on the other side of the decision.
+  const inUse = deployed.filter((l) => l.kind === 'example')
+  const canSend = deployed.filter((l) => l.kind === 'resource')
+  const filed = deployed.filter((l) => l.kind === 'fact')
+
+  const toggle = (id: number) => setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]))
+  /** A card that stands for several rows ticks and unticks them together. */
+  const toggleAll = (ids: number[]) =>
+    setPicked((p) => (ids.every((i) => p.includes(i)) ? p.filter((i) => !ids.includes(i)) : [...new Set([...p, ...ids])]))
+
+  /*
+   * Files crossed off an answer, keyed by the pair rather than by the file.
+   *
+   * The same file legitimately belongs with one answer from a thread and not with another,
+   * so crossing it off here must not cross it off there. Held until the tick, then sent with
+   * it -- nothing is written while somebody is still making up their mind.
+   */
+  const [crossed, setCrossed] = useState<string[]>([])
+  /** The files crossed off one answer, as the badge row wants them. */
+  const crossedOn = (lesson: number) =>
+    crossed.filter((k) => k.startsWith(`${lesson}:`)).map((k) => k.split(':')[1])
+  const cross = (lesson: number, file: number) =>
+    setCrossed((c) => (c.includes(`${lesson}:${file}`) ? c.filter((k) => k !== `${lesson}:${file}`) : [...c, `${lesson}:${file}`]))
+
+  const act = async (ids: number[], status: 'approved' | 'rejected') => {
+    if (!options.onDecide || !ids.length) return
+    setBusy(true)
+    setErr('')
+    try {
+      await options.onDecide({
+        ids,
+        status,
+        crossed: crossed.map((k) => k.split(':').map(Number)).map(([lesson, file]) => ({ lesson, file })),
+      })
+      setPicked([])
+      /*
+       * Read this page again. The rows that were just decided have left the queue, so the page
+       * under them shifts up -- and the queue is this component's own state now, not the
+       * loader's. The counts behind the tabs come from the loader, which onDecide invalidates.
+       */
+      setNonce((n) => n + 1)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const scan = async () => {
+    if (!options.onScan) return
+    setScanning(true)
+    setScanned('')
+    try {
+      const { found, failed } = await options.onScan()
+      // New proposals, so the page on screen is already out of date.
+      setNonce((n) => n + 1)
+      /*
+       * Three answers, not two.
+       *
+       * A thread that threw used to be reported as "nothing new worth teaching" — the same
+       * sentence as a thread with genuinely nothing in it. Somebody asking "are you sure?"
+       * had no way to tell, and the honest answer was that nobody could.
+       */
+      setScanned(
+        failed
+          ? `Could not read ${failed} of them — check the server log.`
+          : found
+            ? `${found} new proposal${found === 1 ? '' : 's'}.`
+            : 'Nothing new worth teaching in those.',
+      )
+    } catch (e) {
+      setScanned(e instanceof Error ? e.message : String(e))
+    } finally {
+      setScanning(false)
+    }
+  }
+
+  return (
+    <Split
+      panes={[
+        {
+          id: 'learned',
+          label: 'What it has learned',
+          hint: 'In use, and waiting on you',
+          body: (
+            <div className="fieldset training">
+      {err && (
+        <div className="field wide">
+          <p className="err">{err}</p>
+        </div>
+      )}
+
+      {!options.onDecide ? (
+        <div className="field wide">
+          <p className="note">
+            Nothing to review yet — this bot does not exist until you finish. Come back once it has answered
+            a few customers and your team has stepped in.
+          </p>
+        </div>
+      ) : (
+        <>
+          {/*
+            What it has learned, first — this is the answer to "did that approval do
+            anything", and it used to be at the bottom of the page under the queue.
+          */}
+          <div className="field wide">
+            <div className="queuehead">
+              <div>
+                <h3>What it has learned</h3>
+                <p className="note">
+                  {deployed.length
+                    ? `${inUse.length} way${inUse.length === 1 ? '' : 's'} to answer · ${filed.length} fact${filed.length === 1 ? '' : 's'}`
+                    : 'Nothing approved yet. Anything waiting below goes to work the moment you approve it.'}
+                </p>
+              </div>
+              {options.onScan && draft.learns && (
+                <div className="row">
+                  {scanned && <span className="note">{scanned}</span>}
+                  {/*
+                    One button, not two.
+
+                    There was a second here — "read imported chats" — for the chats that come
+                    off a phone when a number is linked. Those need lifting out of the
+                    already-read state they are filed in, which is a different action from
+                    reading, so it got its own control. Two buttons both meaning "read my
+                    conversations" is a distinction the person pressing them does not have,
+                    and the one they pressed was usually the wrong one.
+                    `lessons.scan()` now does both: imported threads are adopted, unstamped
+                    and read alongside everything else that has moved since it was last read.
+                  */}
+                  <button type="button" className="ghost small" disabled={scanning} onClick={scan}>
+                    {scanning ? 'Reading…' : 'Read conversations now'}
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/*
+              A door, not a pile.
+
+              These are read when something is wrong with one, not browsed — so the page says
+              how many there are and opens them on request. The list of files it can send used
+              to sit here too and is gone: the same files are on the Knowledge page, where they
+              can be given to any bot, and printing them twice made this page look like the
+              place to manage them.
+            */}
+            {inUse.length > 0 && (
+              <section className="lessongroup">
+                <header className="queuehead">
+                  <div>
+                    <h4>Ways it answers</h4>
+                    <p className="note">
+                      {inUse.length} answer{inUse.length === 1 ? '' : 's'} shown to the model when a customer
+                      asks something similar — with whichever files went with them.
+                    </p>
+                  </div>
+                  <button type="button" className="ghost small" onClick={() => setShowExamples(true)}>
+                    Review and edit
+                  </button>
+                </header>
+              </section>
+            )}
+
+            {filed.length > 0 && (
+              <section className="lessongroup">
+                <header className="queuehead">
+                  <div>
+                    <h4>Facts it filed</h4>
+                    <p className="note">
+                      {filed.length} fact{filed.length === 1 ? '' : 's'} in{' '}
+                      <strong>{options.learnedBase?.name ?? `Learned by ${draft.name || 'this bot'}`}</strong>,
+                      quoted back with a citation whenever one answers a question.
+                    </p>
+                    <p className="note">
+                      {/*
+                        Pointed at rather than reprinted. A hundred learned facts is a knowledge
+                        base, and the place to read, correct or delete one is the knowledge base —
+                        not a copy on a settings tab that can only be retired wholesale.
+                      */}
+                      Read and edit them there. Retiring a fact here only stops it being offered again; it
+                      does not remove what is already filed.
+                    </p>
+                  </div>
+                  {options.learnedBase && (
+                    <a className="pill" href={`/knowledge/${options.learnedBase.id}`}>
+                      Open knowledge base
+                    </a>
+                  )}
+                </header>
+              </section>
+            )}
+          </div>
+
+          {showExamples && (
+            <Examples
+              lessons={inUse}
+              resources={options.resources}
+              attached={options.lessonResources ?? []}
+              onSave={options.onEditExample}
+              onDismissSuggestion={options.onDismissSuggestion}
+              onRetire={(id) => act([id], 'rejected')}
+              onClose={() => setShowExamples(false)}
+            />
+          )}
+
+          {/* The queue, as a door rather than a pile. */}
+          <div className="field wide">
+            <button
+              type="button"
+              className={`approvebar${waiting ? ' waiting' : ''}`}
+              onClick={() => setReviewing(true)}
+              disabled={!waiting}
+            >
+              <span className="count">{waiting}</span>
+              <span>
+                <strong>Training to Approve</strong>
+                <span className="note">
+                  {/* Read off the counts rather than off the rows, which are no longer all here. */}
+                  {waiting
+                    ? `${counts.example ?? 0} way${(counts.example ?? 0) === 1 ? '' : 's'} to answer · ${counts.resource ?? 0} file${(counts.resource ?? 0) === 1 ? '' : 's'} and link${(counts.resource ?? 0) === 1 ? '' : 's'} · ${counts.fact ?? 0} fact${(counts.fact ?? 0) === 1 ? '' : 's'} — none of it live until you say so`
+                    : draft.learns
+                      ? 'Nothing waiting. Threads are read a few minutes after they go quiet.'
+                      : 'Switch learning on above to start collecting.'}
+                </span>
+              </span>
+              {waiting > 0 && <span className="go">Review ›</span>}
+            </button>
+          </div>
+
+          {reviewing && group && (
+            <ReviewModal
+              onClose={() => {
+                setReviewing(false)
+                setPicked([])
+              }}
+            >
+              <>
+                {/*
+                  One kind at a time.
+
+                  Five groups down one column meant scrolling past three decisions to reach
+                  the fourth, and they are not the same decision: a way of answering is a
+                  matter of taste, a price is a fact somebody has to be sure of, and a date
+                  is a thing to check against a calendar. Reviewing them mixed together is
+                  how a queue gets approved in one sweep without being read.
+                */}
+                <div className="seg small" role="tablist" aria-label="Kind of proposal">
+                  {groups.map((g) => (
+                    <button
+                      key={g.id}
+                      role="tab"
+                      aria-selected={g.id === group.id}
+                      className={g.id === group.id ? 'on' : ''}
+                      onClick={() => {
+                        setKind(g.id)
+                        setPicked([])
+                      }}
+                    >
+                      {g.label} ({g.total})
+                    </button>
+                  ))}
+                </div>
+
+                {/*
+                  Only once there is enough to be worth searching, the same rule the
+                  attachment picker uses: a filter over five rows is furniture.
+                */}
+                {waiting > 6 && (
+                  <input
+                    className="search"
+                    aria-label="Search this queue"
+                    placeholder={`Search ${waiting} proposals`}
+                    value={find}
+                    onChange={(e) => setFind(e.target.value)}
+                  />
+                )}
+
+                <div className="reviewbar">
+                  <label className="check">
+                    {/*
+                      Scoped to what is on screen. "Select all" over a queue whose other four
+                      fifths are hidden is a button that approves things nobody looked at.
+                    */}
+                    <input
+                      type="checkbox"
+                      checked={here.length > 0 && here.every((id) => picked.includes(id))}
+                      ref={(el) => {
+                        if (el)
+                          el.indeterminate =
+                            here.some((id) => picked.includes(id)) && !here.every((id) => picked.includes(id))
+                      }}
+                      onChange={() =>
+                        setPicked((p) =>
+                          here.every((id) => p.includes(id))
+                            ? p.filter((id) => !here.includes(id))
+                            : [...new Set([...p, ...here])],
+                        )
+                      }
+                    />
+                    <span>
+                      <strong>{picked.length ? `${picked.length} selected` : `Select all ${group.label.toLowerCase()}`}</strong>
+                    </span>
+                  </label>
+                  <span className="grow" />
+                  <button
+                    className="primary small"
+                    disabled={!picked.length || busy}
+                    onClick={() => act(picked, 'approved')}
+                  >
+                    {busy ? 'Saving…' : `Approve${picked.length ? ` ${picked.length}` : ''}`}
+                  </button>
+                  <button className="ghost small" disabled={!picked.length || busy} onClick={() => act(picked, 'rejected')}>
+                    Reject
+                  </button>
+                </div>
+
+                <section className="lessongroup">
+                  <header>
+                    <h4>{group.label}</h4>
+                    <p className="note">{group.blurb}</p>
+                    {/*
+                      What the search left, then what the folding left. Two different reasons
+                      for a shorter list, and running them into one sentence would make either
+                      impossible to act on.
+                    */}
+                    {term && (
+                      <p className="note">
+                        {group.matched} of {group.total} match “{find.trim()}”. Approve and Select all reach only these.
+                      </p>
+                    )}
+                    {shown.cards > group.rows.length && (
+                      <p className="note">
+                        {group.rows.length} of {shown.cards} card{shown.cards === 1 ? '' : 's'} shown, newest pages last.
+                        Repeats are folded under the one that said it first.
+                      </p>
+                    )}
+                  </header>
+                  {group.rows.length === 0 && <p className="note">Nothing matches.</p>}
+                  {group.rows.map(({ leader, also }) => {
+                    const { days, ids } = asOneCard(leader, also)
+                    // A date card covers every day of its course, so the fold underneath only
+                    // has the other wordings left to show -- not days it is already carrying.
+                    const rest = days.length ? also.filter((l) => !ids.includes(l.id)) : also
+                    return (
+                    <div key={leader.id} className={rest.length ? 'clustered' : undefined}>
+                      <LessonCard
+                        lesson={leader}
+                        days={days}
+                        picked={ids.every((i) => picked.includes(i))}
+                        onToggle={() => toggleAll(ids)}
+                        onTimes={onTimes}
+                        calendars={options.calendars.filter((c) => draft.calendarIds.includes(c.id))}
+                        crossed={crossedOn(leader.id)}
+                        onCross={(file) => cross(leader.id, file)}
+                      />
+                      {/*
+                        Shut to begin with. These are the ones somebody would otherwise read
+                        four times and tick four times; open it when the one above looks like
+                        the wrong wording of the two, not as a matter of course.
+
+                        A follower that has been ticked forces it open, so nothing can be
+                        approved from behind a fold.
+                      */}
+                      {rest.length > 0 && (
+                        <details className="alike" open={rest.some((l) => picked.includes(l.id))}>
+                          <summary>
+                            {rest.length} more like this
+                            {rest.some((l) => picked.includes(l.id)) &&
+                              ` · ${rest.filter((l) => picked.includes(l.id)).length} selected`}
+                          </summary>
+                          {rest.map((l) => (
+                            <LessonCard
+                              key={l.id}
+                              lesson={l}
+                              picked={picked.includes(l.id)}
+                              onToggle={() => toggle(l.id)}
+                              onTimes={onTimes}
+                              calendars={options.calendars.filter((c) => draft.calendarIds.includes(c.id))}
+                              crossed={crossedOn(l.id)}
+                              onCross={(file) => cross(l.id, file)}
+                            />
+                          ))}
+                        </details>
+                      )}
+                    </div>
+                    )
+                  })}
+                  {/*
+                    Paged on the server, in cards rather than rows, so a group is never cut in
+                    half by a page boundary. Pager draws nothing when there is only one page.
+                  */}
+                  <Pager at={page} pages={Math.ceil(shown.cards / LESSONS_PAGE)} setPage={setPage} />
+                </section>
+              </>
+            </ReviewModal>
+          )}
+        </>
+      )}
+            </div>
+          ),
+        },
+        {
+          id: 'learning',
+          label: 'Learning',
+          hint: 'Whether it reads its own conversations',
+          body: (
+            <div className="fieldset training">
+      {/* One line about how this works, then the switch. Everything below is the queue. */}
+      <div className="field wide">
+        <label className="switch">
+          <input type="checkbox" checked={draft.learns} onChange={(e) => set('learns', e.target.checked)} />
+          <span>
+            <strong>Learn from human replies</strong>
+            <span className="note">
+              {draft.learns
+                ? draft.mode === 'learning'
+                  ? 'On, and this bot is watching rather than answering — every thread is training material.'
+                  : 'On. A few minutes after a thread goes quiet it is read, and anything worth keeping is proposed here. Nothing reaches a customer until you approve it. Reading a conversation costs one model call against your own key.'
+                : 'Off. Nothing is taken from these conversations.'}
+            </span>
+          </span>
+        </label>
+      </div>
+
+            </div>
+          ),
+        },
+      ]}
+    />
+  )
+}
+
+/**
+ * The queue, given the whole screen while somebody is actually judging it.
+ *
+ * A native dialog: it closes on Escape, traps focus, and needs no scrim of our own. The
+ * page underneath keeps its scroll position, so approving twenty rows and closing puts you
+ * back where you were rather than at the top of a form.
+ */
+function ReviewModal({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
+  const ref = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    ref.current?.showModal()
+  }, [])
+
+  return (
+    <dialog ref={ref} className="sheet reviewsheet" onClick={lightDismiss} onClose={onClose}>
+      <div className="row" style={{ alignItems: 'flex-start' }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <h3 style={{ fontSize: 17 }}>Training to approve</h3>
+          <p className="note" style={{ margin: 0 }}>
+            Tick what is true and worth repeating. Nothing here has reached a customer.
+          </p>
+        </div>
+        {/* A form with method=dialog closes it natively, so this needs no handler. */}
+        <form method="dialog">
+          <button className="ghost small">Close</button>
+        </form>
+      </div>
+      {children}
+    </dialog>
+  )
+}
+
+/** The part of a URL worth reading at a glance. Falls back to the whole thing. */
+const hostOf = (url: string) => {
+  try {
+    return new URL(url).host.replace(/^www\./, '')
+  } catch {
+    return url
+  }
+}
+
+/**
+ * Every quarter hour of the day, once.
+ *
+ * Built at module load rather than per render: it is the same ninety-six strings on every
+ * card, and rebuilding them for each is work nobody asked for.
+ */
+const QUARTERS = Array.from({ length: 96 }, (_, i) => {
+  const h = Math.floor(i / 4)
+  const m = (i % 4) * 15
+  const value = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
+  // Shown the way people say it, stored the way the database wants it.
+  const hour = h % 12 === 0 ? 12 : h % 12
+  return { value, label: `${hour}:${String(m).padStart(2, '0')} ${h < 12 ? 'am' : 'pm'}` }
+})
+
+/**
+ * Picking a time, from a list rather than by typing into one.
+ *
+ * `<input type="time">` renders as `--:--` and wants a keyboard, which on a phone means a
+ * spinner nobody can hit and a value that stays empty because the hour was typed and the
+ * minutes were not. A select is one tap, cannot hold a half-finished time, and on a phone
+ * is a native wheel.
+ *
+ * Quarter hours, because that is what businesses schedule on. A time that is not one of
+ * them — 19:05, out of a conversation — is kept and offered rather than snapped to
+ * something near it, which would silently move an event somebody was told about.
+ */
+function TimePick({
+  value,
+  onChange,
+  id,
+  allowNone = true,
+}: {
+  value: string
+  onChange: (next: string) => void
+  id?: string
+  allowNone?: boolean
+}) {
+  const options = value && !QUARTERS.some((q) => q.value === value) ? [{ value, label: value }, ...QUARTERS] : QUARTERS
+
+  return (
+    <select id={id} className="timepick" value={value} onChange={(e) => onChange(e.target.value)}>
+      {allowNone && <option value="">—</option>}
+      {options.map((q) => (
+        <option key={q.value} value={q.value}>
+          {q.label}
+        </option>
+      ))}
+    </select>
+  )
+}
+
+/** A day and a time, in the reader's own zone. */
+const learnedAt = (at: string) =>
+  new Date(at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+
+/**
+ * One proposal, laid out as the thing it is.
+ *
+ * An example is an exchange, so it reads as one: the question quoted and muted, the answer
+ * below it in the company's own words. A fact is a claim, so the claim is the headline and
+ * what the knowledge base already says sits under it for comparison. Both carry where they
+ * came from, because "is this true" is usually answered by reading the conversation.
+ */
+function LessonCard({
+  lesson,
+  picked,
+  onToggle,
+  onTimes,
+  calendars,
+  crossed = [],
+  onCross,
+  days = [],
+}: {
+  lesson: Lesson
+  picked: boolean
+  onToggle: () => void
+  /**
+   * Every day this card covers, for a date that is one course meeting several times.
+   *
+   * Empty for a single day and for every other kind, where the card is one row and the row is
+   * one thing.
+   */
+  days?: Lesson[]
+  /** Ids of the files crossed off this answer, held by the queue until the tick. */
+  crossed?: string[]
+  onCross?: (file: number) => void
+  /** Present on a date proposal, which may have arrived without an hour. */
+  onTimes?: (input: {
+    id: number
+    start_time?: string | null
+    end_time?: string | null
+    calendar_id?: number | null
+  }) => Promise<void>
+  /** The calendars this bot may read — the only ones a date it learned may be filed on. */
+  calendars?: Options['calendars']
+}) {
+  const [from, setFrom] = useState(lesson.start_time ?? '')
+  const [to, setTo] = useState(lesson.end_time ?? '')
+  const [cal, setCal] = useState(lesson.calendar_id ?? calendars?.[0]?.id ?? 0)
+  return (
+    <div className={`lessoncard${picked ? ' picked' : ''}`}>
+      <label className="check">
+        <input type="checkbox" checked={picked} onChange={onToggle} />
+        <span className="body">
+          {lesson.kind === 'resource' ? (
+            /*
+             * A file proposal is the file plus when to send it. The name and size are the
+             * card, and the description underneath is what a customer's request will be
+             * matched against — so it is the part worth reading before approving.
+             */
+            <>
+              <span className="proposedfile">
+                <span className="filekind" aria-hidden="true">
+                  {lesson.attachment_id ? (lesson.answer.split('.').pop() ?? 'file').slice(0, 4).toUpperCase() : '↗'}
+                </span>
+                <span>
+                  {/* A link's own address is the interesting half, so it is the one shown whole. */}
+                  <b>{lesson.attachment_id ? lesson.answer : hostOf(lesson.answer)}</b>
+                  <small>
+                    {lesson.attachment_id
+                      ? `${lesson.file_size ? `${Math.max(1, Math.round(lesson.file_size / 1024))} KB` : 'file'}${lesson.file_mime ? ` · ${lesson.file_mime}` : ''}`
+                      : lesson.answer}
+                  </small>
+                </span>
+              </span>
+              <p className="said">Send it when somebody asks for {lesson.question}</p>
+            </>
+          ) : lesson.kind === 'contact' ? (
+            /*
+             * A change to one person's card: whose, which field, and what it would replace.
+             *
+             * What is there now is the half worth reading. Approving a birthday onto a blank
+             * field is filling a gap; approving a company over one already filled is
+             * overwriting what somebody typed, and those should not look the same.
+             */
+            <>
+              <p className="factlabel">
+                {lesson.customer_name ?? 'This contact'} · {lesson.question}
+              </p>
+              <p className="claim">{lesson.answer}</p>
+              <p className="said">
+                {lesson.current
+                  ? `Replaces what the card says now: ${lesson.current}`
+                  : 'The card has nothing in that field yet.'}
+              </p>
+            </>
+          ) : lesson.kind === 'product' ? (
+            /* A product is a name and a price, so it reads as a row of a price list. */
+            <>
+              <p className="claim">{lesson.answer}</p>
+              <p className="said">
+                {lesson.price === null || lesson.price === undefined
+                  ? 'No price was said — it will be listed as “on request”.'
+                  : [lesson.currency ?? 'SGD', lesson.price.toFixed(2), lesson.unit].filter(Boolean).join(' ')}
+                {lesson.question ? ' · ' + lesson.question : ''}
+              </p>
+            </>
+          ) : lesson.kind === 'event' ? (
+            /* A date is a date, so it leads with when — and says so at a size you can read. */
+            <>
+              {/*
+                The date, as the substance of the card rather than a caption above it.
+
+                It used to borrow .factlabel, which is 10px grey uppercase monospace and right
+                for what a *fact* is about. On a date card it read as a caption, and the two
+                time pickers underneath were the biggest controls on the row — so the pickers
+                looked like where the dates went, and the dates themselves went unseen.
+              */}
+              {/*
+                Every day of the course on one line, because that is one decision.
+
+                Nine customers asked about the September intake and each answer was learned, so
+                the queue held nine wordings of each of three class days -- twenty-seven cards
+                for one thing somebody says yes to once. Ticking this writes one date per day.
+              */}
+              <p className="whenline">
+                {days.length > 1
+                  ? asDays(days.map((d) => d.starts_on).filter((x): x is string => !!x))
+                  : lesson.starts_on
+                    ? asRange(lesson.starts_on, lesson.ends_on)
+                    : ''}
+                {lesson.repeats && lesson.repeats !== 'once' ? (
+                  <span className="every">every {lesson.repeats.replace('ly', '')}</span>
+                ) : null}
+              </p>
+              {days.length > 1 && <p className="note">{days.length} days, approved together.</p>}
+              <p className="claim">{lesson.answer}</p>
+              {/*
+                The hour, asked for rather than guessed.
+
+                A team saying "the 25th" and nothing else is the common case, and a calendar
+                entry with an invented time is one nobody is ever prompted to correct — so
+                the card asks, here, before it can be approved. Leaving the end blank is
+                fine: an event that starts at seven runs to eight unless somebody says
+                otherwise.
+              */}
+              {onTimes && (
+                <div
+                  className="eventtimes"
+                  // The card's own label is a checkbox; a click in here is somebody setting a
+                  // time, not ticking the row.
+                  onClick={(e) => e.preventDefault()}
+                >
+                  {/*
+                    Where it goes, chosen from what this bot can actually read. Filing a date
+                    on a calendar the bot was not given would be a date it cannot then quote
+                    — which reads as the approval having done nothing.
+                  */}
+                  {!!calendars?.length && (
+                    <label>
+                      <span className="note">Calendar</span>
+                      <select
+                        className="calpick"
+                        value={cal}
+                        onChange={(e) => {
+                          const next = Number(e.target.value)
+                          setCal(next)
+                          void onTimes({ id: lesson.id, start_time: from, end_time: to, calendar_id: next })
+                        }}
+                      >
+                        {calendars.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  {/* "From" and "To" on their own read as a date range, which is what the
+                      person reading this card is looking for — so they say which. */}
+                  <label>
+                    <span className="note">Start time</span>
+                    {/* Saved on the change, not on the way out: a select has no half-typed
+                        state to wait for, and a card somebody ticks straight after picking
+                        should already carry the time. */}
+                    <TimePick
+                      value={from}
+                      onChange={(next) => {
+                        setFrom(next)
+                        void onTimes({ id: lesson.id, start_time: next, end_time: to, calendar_id: cal })
+                      }}
+                    />
+                  </label>
+                  <label>
+                    <span className="note">End time</span>
+                    <TimePick
+                      value={to}
+                      onChange={(next) => {
+                        setTo(next)
+                        void onTimes({ id: lesson.id, start_time: from, end_time: next, calendar_id: cal })
+                      }}
+                    />
+                  </label>
+                  <span className="note">
+                    {from
+                      ? to
+                        ? ''
+                        : 'Ends an hour later unless you say otherwise.'
+                      : calendars?.length
+                        ? 'Nobody said a time. Add one before approving, or it goes on as a whole day.'
+                        : 'This bot has no calendar ticked under Knowledge, so there is nowhere to file this.'}
+                  </span>
+                </div>
+              )}
+            </>
+          ) : lesson.kind === 'example' ? (
+            <>
+              {lesson.question && <p className="asked">{lesson.question}</p>}
+              <p className="said">{lesson.answer}</p>
+            </>
+          ) : (
+            <>
+              {/* What it is about, then what it says. The label is how somebody finds this
+                  again once it is in the knowledge base, so it is filed with it. */}
+              {lesson.question && <p className="factlabel">{lesson.question}</p>}
+              <p className="claim">{lesson.answer}</p>
+              {/*
+                What the knowledge base already says closest to this, shown rather than acted
+                on. A similarity threshold would either bury real new facts or wave through
+                restatements; whoever is reading the row is the better judge and is here.
+              */}
+              <p className={`nearest${lesson.nearest ? '' : ' none'}`}>
+                <span>{lesson.nearest ? 'Closest thing already known' : 'Nothing like this is known yet'}</span>
+                {lesson.nearest}
+              </p>
+            </>
+          )}
+
+          {/*
+            What goes out with it, above the footer so it is read before the tick. A file
+            already approved arrives with the answer; one still in the queue is marked and
+            does not go until it gets its own tick.
+          */}
+          <Sends items={lesson.will_send} crossed={crossed} onCross={onCross} />
+
+          <span className="foot">
+            <span className="pill">
+              {lesson.kind === 'example'
+                ? 'way to answer'
+                : lesson.kind === 'resource'
+                  ? lesson.attachment_id
+                    ? 'file to send'
+                    : 'link to send'
+                  : lesson.kind === 'event'
+                    ? 'date'
+                    : lesson.kind === 'product'
+                      ? 'product'
+                      : 'fact'}
+            </span>
+            <span className="note">learned {learnedAt(lesson.created_at)}</span>
+            {lesson.conversation_id && (
+              <a
+                className="note"
+                href={`/inbox?id=${lesson.conversation_id}`}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(e) => e.stopPropagation()}
+              >
+                read the conversation ›
+              </a>
+            )}
+          </span>
+        </span>
+      </label>
+    </div>
+  )
 }
 
 function Identity({ draft, set, options }: Fields) {
@@ -439,245 +1569,6 @@ function Identity({ draft, set, options }: Fields) {
         },
       ]}
     />
-  )
-}
-
-// ---------------------------------------------------------------- answers
-
-/**
- * Questions somebody has written the reply to.
- *
- * Not harvested. Nothing reads your inbox and proposes what you might have meant — you
- * write the answer you want given, and that is the answer it gives. There is no approval
- * queue for the same reason: the person writing it is the person who would have approved it.
- *
- * These outrank the knowledge base at answering time. A crawled page is whatever the website
- * said last year; this is somebody deciding, today, what the reply should be.
- */
-function Answers({ draft, set, options }: Fields) {
-  const [adding, setAdding] = useState(false)
-  const readOnly = !options.onAddExample
-
-  return (
-    <div className="fieldset">
-      <div className="field wide">
-        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
-          <strong style={{ fontSize: 15 }}>Answers</strong>
-          {!readOnly && (
-            <button type="button" className="ghost small" onClick={() => setAdding(true)}>
-              Write an answer
-            </button>
-          )}
-        </div>
-        <p className="note" style={{ marginTop: 4 }}>
-          {readOnly
-            ? 'Once this bot exists you can write the answers it should give.'
-            : 'Ask it the way a customer would, and write the reply you want sent. These are used ahead of the knowledge base when both fit.'}
-        </p>
-      </div>
-
-      {adding && (
-        <div className="field wide">
-          <ExampleForm
-            resources={options.resources}
-            onCancel={() => setAdding(false)}
-            onSave={async (v) => {
-              await options.onAddExample!(v)
-              setAdding(false)
-            }}
-          />
-        </div>
-      )}
-
-      <div className="field wide">
-        {options.examples.length === 0 ? (
-          <p className="note" style={{ marginTop: 0 }}>
-            Nothing written yet. The bot answers from its knowledge base until there is.
-          </p>
-        ) : (
-          options.examples.map((e) => (
-            <ExampleRow
-              key={e.id}
-              example={e}
-              resources={options.resources}
-              attached={options.exampleResources.filter((r) => r.lesson_id === e.id).map((r) => r.id)}
-              onSave={options.onEditExample}
-              onRemove={options.onRemoveExample}
-            />
-          ))
-        )}
-      </div>
-
-      {/*
-        The other half of the section, and a different thing entirely.
-        Above is what you tell it to say. This is what it notices about the person it is
-        saying it to — and because that is personal data being written without anybody
-        asking, it gets a switch and a plain description of exactly what it reads.
-      */}
-      <div className="field wide" style={{ borderTop: '1px solid var(--line)', paddingTop: 16, marginTop: 8 }}>
-        <strong style={{ fontSize: 15 }}>Learning about customers</strong>
-        <label className="tick" style={{ marginTop: 8 }}>
-          <input type="checkbox" checked={draft.learns} onChange={(e) => set('learns', e.target.checked)} />
-          Read finished conversations for details about the customer
-        </label>
-        <p className="note" style={{ marginTop: 6 }}>
-          {draft.learns
-            ? 'Once a thread goes quiet it is read once, and only for what the customer said about themselves — their company, where they are, when they are away. A blank field on their card is filled; anything that disagrees with what you typed waits on the card for you to decide. It never learns your answers, and never anything about the business.'
-            : 'Off. Contact details are only what somebody types on the card.'}
-        </p>
-      </div>
-    </div>
-  )
-}
-
-/** The two boxes and a file picker, shared by writing a new answer and correcting one. */
-function ExampleForm({
-  initial,
-  resources,
-  onSave,
-  onCancel,
-}: {
-  initial?: { question: string; answer: string; resourceIds: number[] }
-  resources: Options['resources']
-  onSave: (v: { question: string; answer: string; resourceIds: number[] }) => Promise<void>
-  onCancel: () => void
-}) {
-  const [question, setQuestion] = useState(initial?.question ?? '')
-  const [answer, setAnswer] = useState(initial?.answer ?? '')
-  const [picked, setPicked] = useState<number[]>(initial?.resourceIds ?? [])
-  const [busy, setBusy] = useState(false)
-  const [err, setErr] = useState('')
-
-  const save = async () => {
-    if (!question.trim() || !answer.trim()) return
-    setBusy(true)
-    setErr('')
-    try {
-      await onSave({ question: question.trim(), answer: answer.trim(), resourceIds: picked })
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <div className="card" style={{ marginBottom: 12 }}>
-      <label>When somebody asks</label>
-      <input
-        value={question}
-        onChange={(e) => setQuestion(e.target.value)}
-        placeholder="do you deliver on Sundays?"
-        maxLength={500}
-        autoFocus
-      />
-
-      <label style={{ marginTop: 12, display: 'block' }}>Reply with</label>
-      <textarea
-        value={answer}
-        onChange={(e) => setAnswer(e.target.value)}
-        placeholder="We deliver Monday to Saturday, before noon."
-        rows={4}
-        maxLength={2000}
-      />
-
-      {resources.length > 0 && (
-        <>
-          <label style={{ marginTop: 12, display: 'block' }}>Send with it</label>
-          <div className="row wrap" style={{ gap: 6 }}>
-            {resources.map((r) => (
-              <label key={r.id} className="tick">
-                <input
-                  type="checkbox"
-                  checked={picked.includes(r.id)}
-                  onChange={(e) =>
-                    setPicked((p) => (e.target.checked ? [...p, r.id] : p.filter((x) => x !== r.id)))
-                  }
-                />
-                {r.title}
-              </label>
-            ))}
-          </div>
-        </>
-      )}
-
-      {err && (
-        <p className="err" style={{ marginTop: 12 }} role="alert">
-          {err}
-        </p>
-      )}
-
-      <div className="row" style={{ marginTop: 14 }}>
-        <button type="button" className="primary" disabled={busy || !question.trim() || !answer.trim()} onClick={save}>
-          {busy ? 'Saving…' : 'Save'}
-        </button>
-        <button type="button" className="ghost small" onClick={onCancel}>
-          Cancel
-        </button>
-      </div>
-    </div>
-  )
-}
-
-/** One written answer: read it, open it to correct it, or delete it. */
-function ExampleRow({
-  example,
-  resources,
-  attached,
-  onSave,
-  onRemove,
-}: {
-  example: { id: number; question: string; answer: string }
-  resources: Options['resources']
-  attached: number[]
-  onSave?: (input: { id: number; question: string; answer: string; resourceIds: number[] }) => Promise<void>
-  onRemove?: (id: number) => Promise<void>
-}) {
-  const [open, setOpen] = useState(false)
-  const files = resources.filter((r) => attached.includes(r.id))
-
-  if (open && onSave)
-    return (
-      <ExampleForm
-        initial={{ question: example.question, answer: example.answer, resourceIds: attached }}
-        resources={resources}
-        onCancel={() => setOpen(false)}
-        onSave={async (v) => {
-          await onSave({ id: example.id, ...v })
-          setOpen(false)
-        }}
-      />
-    )
-
-  return (
-    <div className="card" style={{ marginBottom: 8 }}>
-      <strong style={{ fontSize: 15 }}>{example.question}</strong>
-      <p style={{ margin: '6px 0 0', whiteSpace: 'pre-wrap' }}>{example.answer}</p>
-      {files.length > 0 && (
-        <p className="note" style={{ margin: '8px 0 0' }}>
-          Sends {files.map((f) => f.title).join(', ')}
-        </p>
-      )}
-      {(onSave || onRemove) && (
-        <div className="row" style={{ marginTop: 10 }}>
-          {onSave && (
-            <button type="button" className="ghost small" onClick={() => setOpen(true)}>
-              Edit
-            </button>
-          )}
-          {onRemove && (
-            <button
-              type="button"
-              className="ghost small bad"
-              style={{ marginLeft: 'auto' }}
-              onClick={() => onRemove(example.id)}
-            >
-              Delete
-            </button>
-          )}
-        </div>
-      )}
-    </div>
   )
 }
 
@@ -1272,6 +2163,55 @@ function Catalogue({ options }: { options: Options }) {
           </button>
         )}
 
+        {/*
+          Reading a base rather than typing the list again.
+
+          Straight onto this list, with no approval step. Training is for a product somebody
+          *mentioned* in a conversation, where naming a thing is not the same as confirming
+          it exists — this is a person pointing at their own price list and pressing read, a
+          decision already made. Anything the model got wrong is edited here, in front of
+          every other price, which is where a wrong one actually shows.
+        */}
+        {options.onReadCatalogue && options.bases.length > 0 && (
+          <div className="row wrap" style={{ marginTop: 18, paddingTop: 14, borderTop: '1px solid var(--line)' }}>
+            <label htmlFor="p-from" className="note" style={{ margin: 0 }}>
+              Read a knowledge base for products
+            </label>
+            <select id="p-from" value={from} onChange={(e) => setFrom(Number(e.target.value))} style={{ maxWidth: 240 }}>
+              <option value={0}>Pick one…</option>
+              {options.bases.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.name} ({b.documents})
+                </option>
+              ))}
+            </select>
+            <button
+              className="ghost small"
+              disabled={!from || !!busy}
+              onClick={() => {
+                setBusy('read')
+                setErr('')
+                setRead('')
+                void options
+                  .onReadCatalogue!(from)
+                  .then((r) =>
+                    setRead(
+                      r.found === 0
+                        ? 'Nothing in there reads as something you sell.'
+                        : `Added ${r.added}${r.known ? `, ${r.known} already listed` : ''}.${
+                            r.more ? ` Only the first ${r.read} parts were read.` : ''
+                          }`,
+                    ),
+                  )
+                  .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)))
+                  .finally(() => setBusy(''))
+              }}
+            >
+              {busy === 'read' ? 'Reading…' : 'Read it'}
+            </button>
+            {read && <span className="note">{read}</span>}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -1301,7 +2241,9 @@ function Catalogue({ options }: { options: Options }) {
 function DatesPointer({ draft, set, options }: Fields) {
   const soon = [...options.events]
     .filter((e) => draft.calendarIds.includes(e.calendar_id))
-    .filter((e) => (e.ends_on ?? e.starts_on) >= new Date().toISOString().slice(0, 10))
+    // todayFor, not toISOString: the UTC day is yesterday in Singapore until 08:00, so this list
+    // went on offering yesterday's session for the whole of every morning.
+    .filter((e) => (e.ends_on ?? e.starts_on) >= todayFor())
     .slice(0, 6)
 
   return (
@@ -1504,7 +2446,6 @@ function Behaviour({ draft, set, options }: Fields) {
   // works, because it quietly falls back, so the only symptom is a bot not running on what
   // the page says it runs on.
   const stale = !!draft.model && !offered.some((m) => m.id === draft.model)
-
   return (
     <Split
       panes={[
@@ -1582,8 +2523,10 @@ function Behaviour({ draft, set, options }: Fields) {
         </select>
         <p className="note">
           {!options.model
-            ? 'No Autobricks key on this workspace — every question goes to a person until one is saved in Settings.'
-            : 'Your Autobricks key, so this is its live catalogue. Premium models need credit on that account.'}
+            ? 'No model key on this workspace — every question goes to a person until one is set.'
+            : options.models.provider === 'autobricks'
+              ? 'Your own Autobricks key, so this is its live catalogue. Premium models need credit on that account.'
+              : 'The shared key. Default follows OPENROUTER_MODEL, so one change moves every bot that has not chosen for itself.'}
           {stale && ' This bot is set to a model this provider does not offer, so it is running on the default instead.'}
         </p>
       </div>
@@ -1614,8 +2557,8 @@ function Behaviour({ draft, set, options }: Fields) {
       <div className="field wide">
         <strong style={{ fontSize: 15 }}>Guardrails</strong>
         <p className="note" style={{ marginTop: 4 }}>
-          The lists below hold for any business. Add the rules that only apply to yours — anything the
-          bot must always hand to a person, and anything it must not discuss at all.
+          These two lists hold for any business. Add whatever only applies to yours: anything it
+          must refuse outright, and anything it must hand to a person rather than answer itself.
         </p>
       </div>
 
@@ -1648,6 +2591,659 @@ function Behaviour({ draft, set, options }: Fields) {
   )
 }
 
+/**
+ * Every approved example, open for correction.
+ *
+ * An example is a transcript, and a transcript is rarely phrased the way anybody would choose
+ * on reflection — a typo, an aside to a colleague, a sentence that only made sense in that
+ * thread. Until now the only thing that could be done about one was retire it, which threw
+ * away a good answer over a bad word.
+ *
+ * The files matter as much as the words. The team said "here is our full product list" and
+ * attached the PDF; learning only the sentence gives a bot that promises a file and sends
+ * nothing, which is worse than never having learned it.
+ */
+function Examples({
+  lessons,
+  resources,
+  attached,
+  onSave,
+  onDismissSuggestion,
+  onRetire,
+  onClose,
+}: {
+  lessons: Lesson[]
+  resources: Options['resources']
+  attached: { lesson_id: number; id: number }[]
+  onSave?: (input: { id: number; question: string; answer: string; resourceIds: number[] }) => Promise<void>
+  /** Turn down a proposed wording so it stops being offered. */
+  onDismissSuggestion?: (id: number) => Promise<void>
+  onRetire: (id: number) => void
+  onClose: () => void
+}) {
+  /*
+   * Opened once, on mount — the pattern ReviewModal below already uses.
+   *
+   * This was `ref={(el) => el?.showModal()}`, a new function identity on every render, so
+   * React detached and re-attached the ref and called showModal() again each time. Browsers
+   * no-op that on an already-open dialog, so it was harmless and invisible; it is still a
+   * re-entrancy nobody meant, and this dialog re-renders on every keystroke in it.
+   */
+  const sheet = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    sheet.current?.showModal()
+  }, [])
+
+  // The same narrowing as the review queue, for the same reason: eighty of these is a scroll.
+  const [find, setFind] = useState('')
+  const term = find.trim().toLowerCase()
+  /*
+   * And a second narrowing, for the one job nobody can do by scrolling: a backfill proposes a
+   * wording for every example that will go out of date, and finding twenty of them among eighty
+   * by eye is how they stay unaccepted.
+   */
+  const [onlySuggested, setOnlySuggested] = useState(false)
+  // Either half. An example whose answer needs nothing and whose question names a dead month is
+  // still one somebody has to accept, and counting only answers hid twenty of them.
+  const waiting = lessons.filter(
+    (l) =>
+      (!!l.suggested && l.suggested !== l.answer) ||
+      (!!l.suggested_question && l.suggested_question !== (l.question ?? '')),
+  )
+  const shown = (onlySuggested ? waiting : lessons).filter((l) =>
+    term ? `${l.question ?? ''} ${l.answer}`.toLowerCase().includes(term) : true,
+  )
+
+  return (
+    <dialog className="sheet wide" ref={sheet} onClick={lightDismiss} onClose={onClose}>
+      <div className="sheetbody">
+        <div className="queuehead">
+          <div>
+            <h3 style={{ marginTop: 0 }}>Ways it answers</h3>
+            <p className="note">
+              Shown to the model when somebody asks something similar. Correct the wording, or change which
+              files go out with it.
+            </p>
+          </div>
+          <button type="button" className="ghost small" onClick={onClose}>
+            Done
+          </button>
+        </div>
+
+        {lessons.length > 6 && (
+          <input
+            className="search"
+            aria-label="Search these answers"
+            placeholder={`Search ${lessons.length} answers`}
+            value={find}
+            onChange={(e) => setFind(e.target.value)}
+          />
+        )}
+
+        {(() => {
+          const card = (l: Lesson) => (
+            <ExampleCard
+              key={l.id}
+              lesson={l}
+              resources={resources}
+              picked={attached.filter((a) => a.lesson_id === l.id).map((a) => a.id)}
+              onSave={onSave}
+              onDismissSuggestion={onDismissSuggestion}
+              onRetire={() => onRetire(l.id)}
+            />
+          )
+          const groups = cluster(shown)
+          const folded = shown.length - groups.length
+          return (
+            <>
+              {term && (
+                <p className="note">
+                  {shown.length} of {lessons.length} match “{find.trim()}”.
+                </p>
+              )}
+              {!!waiting.length && (
+                <label className="check" style={{ marginBottom: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={onlySuggested}
+                    onChange={(e) => setOnlySuggested(e.target.checked)}
+                  />
+                  <span>
+                    {waiting.length} {waiting.length === 1 ? 'has' : 'have'} a suggested wording, with what
+                    expires taken out
+                  </span>
+                </label>
+              )}
+              {/*
+                Said once at the top rather than left as arithmetic. Eighty examples that read
+                as sixty-five is a difference somebody will otherwise notice and mistrust.
+              */}
+              {folded > 0 && (
+                <p className="note">
+                  {folded} of these repeat another, and are folded under it. The bot is using all of
+                  them — retire the ones that read worse.
+                </p>
+              )}
+              {groups.length === 0 && <p className="note">Nothing matches.</p>}
+              {groups.map(({ leader, also }) => (
+                <div key={leader.id} className={also.length ? 'clustered' : undefined}>
+                  {card(leader)}
+                  {also.length > 0 && (
+                    <details className="alike">
+                      <summary>{also.length} more like this</summary>
+                      {also.map(card)}
+                    </details>
+                  )}
+                </div>
+              ))}
+            </>
+          )
+        })()}
+      </div>
+    </dialog>
+  )
+}
+
+/** Sizes people recognise, for a row that has to say what a thing is in one line. */
+const fileSize = (bytes: number) =>
+  bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`
+
+/** Four characters that say what it is: the extension, or an arrow for somewhere else. */
+const fileMark = (r: Options['resources'][number]) =>
+  r.kind === 'link' ? '↗' : (r.title.split('.').pop() ?? 'file').slice(0, 4).toUpperCase()
+
+/** One thing a chip stands for: a file we hold and can show, or a link that lives elsewhere. */
+type Shown = { key: string; title: string; href: string; mime: string | null; isFile: boolean }
+
+/**
+ * Things that go out with an answer, as badges you can look inside.
+ *
+ * Written once for both screens. The queue crosses a badge off and keeps it on show, struck
+ * through, because changing your mind is most of reviewing; the editor takes it off the list
+ * outright, because there the list is the setting. Same chip either way -- what the cross does
+ * is the caller's business.
+ */
+function FileChips({
+  items,
+  crossed = [],
+  onCross,
+  removes,
+}: {
+  items: Shown[]
+  crossed?: string[]
+  onCross?: (key: string) => void
+  /** Whether the cross deletes the chip rather than striking it. Changes only the wording. */
+  removes?: boolean
+}) {
+  const [peek, setPeek] = useState<{ title: string; href: string; mime: string | null } | null>(null)
+  if (!items.length) return null
+
+  return (
+    <>
+      {items.map((f) => {
+        const off = crossed.includes(f.key)
+        return (
+          <span key={f.key} className={`chip ${off ? 'off' : 'on'}`}>
+            <button
+              type="button"
+              className="chiplook"
+              title={off ? `${f.title} — not sent with this answer` : `Look at ${f.title}`}
+              onClick={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                // A link goes to its own tab; a file we hold opens here.
+                if (f.isFile) setPeek({ title: f.title, href: f.href, mime: f.mime })
+                else window.open(f.href, '_blank', 'noopener')
+              }}
+            >
+              <span className="mark">
+                {f.isFile ? (f.title.split('.').pop() ?? 'file').slice(0, 4).toUpperCase() : '↗'}
+              </span>
+              <span className="chipname">{f.title}</span>
+            </button>
+            {onCross && (
+              <button
+                type="button"
+                className="chipx"
+                title={
+                  removes
+                    ? `Stop sending ${f.title} with this answer`
+                    : off
+                      ? `Send ${f.title} with this answer after all`
+                      : `Do not send ${f.title} with this answer`
+                }
+                onClick={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  onCross(f.key)
+                }}
+              >
+                <span aria-hidden="true">{off ? '↺' : '×'}</span>
+              </button>
+            )}
+          </span>
+        )
+      })}
+      {peek && <Peek at={peek} onClose={() => setPeek(null)} />}
+    </>
+  )
+}
+
+/**
+ * What a proposed answer sends, in the review queue.
+ *
+ * Two states and no third: filled means this answer sends it, outlined and struck means it
+ * does not. Whether the bot already holds the file is not the reviewer's problem -- approving
+ * an answer with a badge left on adds the file to the bot's files and links if it is new. The
+ * question on this screen is only ever "does this go out with this answer".
+ *
+ * Crossing off is per answer, not per file: the same price list belongs with one reply from a
+ * thread and not with another, and taking it off here never takes it off the bot.
+ *
+ * The match behind these is the whole conversation, which cannot tell which answer a file
+ * belonged to -- a thread with four answers and one photo offers the photo to all four. That
+ * is a judgement a person makes in a second by looking at it, which is what the badge opens.
+ */
+function Sends({
+  items,
+  crossed,
+  onCross,
+}: {
+  items: Lesson['will_send']
+  crossed: string[]
+  onCross?: (file: number) => void
+}) {
+  if (!items?.length) return null
+  // Something kept on this answer that the bot does not hold yet, which approving will add.
+  const adds = items.some((f) => f.status !== 'approved' && !crossed.includes(String(f.id)))
+
+  return (
+    <div className="sends">
+      <p className="sendrow">
+        <span className="note">Sends with this answer</span>
+        <FileChips
+          items={items.map((f) => ({
+            key: String(f.id),
+            title: f.title,
+            href: f.attachment_id ? `/api/attachment/${f.attachment_id}` : f.title,
+            mime: f.mime,
+            isFile: !!f.attachment_id,
+          }))}
+          crossed={crossed}
+          onCross={onCross && ((key) => onCross(Number(key)))}
+        />
+      </p>
+      {/*
+        Adding a file to the bot's library is a consequence worth one line, because it is the
+        one thing on this screen that outlives the answer being approved.
+      */}
+      {adds && (
+        <p className="note sendnote">
+          Approving adds any of these the bot does not hold yet to its <strong>files and links</strong>.
+        </p>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Choosing, in its own sheet.
+ *
+ * Off the card because choosing and reading are different jobs. A card answers "what does
+ * this send?" in one glance at its badges; this answers "what else could it send?", which is
+ * the whole library and only wanted while somebody is actually choosing.
+ *
+ * Toggling writes straight through to the card behind it -- there is no separate confirm,
+ * because the card's own Save is the confirm and a second one would only be a thing to forget.
+ */
+function AttachSheet({
+  all,
+  ids,
+  onToggle,
+  onClose,
+}: {
+  all: Options['resources']
+  ids: number[]
+  onToggle: (id: number) => void
+  onClose: () => void
+}) {
+  const sheet = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    sheet.current?.showModal()
+  }, [])
+
+  return (
+    <dialog className="sheet" ref={sheet} onClick={lightDismiss} onClose={onClose}>
+      <div className="sheetbody">
+        <div className="queuehead">
+          <div>
+            <h3 style={{ marginTop: 0 }}>Send these with it</h3>
+            <p className="note">The bot attaches whatever is ticked when it answers this way.</p>
+          </div>
+          <button type="button" className="ghost small" onClick={onClose}>
+            Done
+          </button>
+        </div>
+        <Attachables all={all} ids={ids} onToggle={onToggle} />
+      </div>
+    </dialog>
+  )
+}
+
+/**
+ * Choosing what goes out with an answer.
+ *
+ * A column of checkboxes is fine for four things and useless for forty: the question a
+ * person actually has is "what does this answer send?", and a flat list makes them read
+ * every row to find out. So what is attached is lifted out as chips — the answer, in one
+ * line, each one removable — and everything else is a searchable list underneath.
+ *
+ * The search box only appears once there is enough to search, because a filter over five
+ * rows is furniture.
+ */
+function Attachables({
+  all,
+  ids,
+  onToggle,
+}: {
+  all: Options['resources']
+  ids: number[]
+  onToggle: (id: number) => void
+}) {
+  const [q, setQ] = useState('')
+  const term = q.trim().toLowerCase()
+
+  const chosen = all.filter((r) => ids.includes(r.id))
+  const rest = all.filter(
+    (r) => !ids.includes(r.id) && (!term || `${r.title} ${r.description}`.toLowerCase().includes(term)),
+  )
+
+  return (
+    <div className="attachpicker">
+      {chosen.length > 0 && (
+        <div className="attached sendrow">
+          <FileChips
+            items={chosen.map((r) => ({
+              key: String(r.id),
+              title: r.title,
+              href: r.kind === 'link' ? (r.url ?? '') : `/api/resource/${r.token}`,
+              mime: r.mime,
+              isFile: r.kind !== 'link',
+            }))}
+            onCross={(key) => onToggle(Number(key))}
+            removes
+          />
+        </div>
+      )}
+
+
+      {all.length > 6 && (
+        <input
+          className="attachfind"
+          placeholder={`Search ${all.length} files and links`}
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
+      )}
+
+      <div className="pickfiles">
+        {rest.map((r) => (
+          <button key={r.id} type="button" className="filerow" onClick={() => onToggle(r.id)}>
+            <span className="mark">{fileMark(r)}</span>
+            <span className="what">
+              <b>{r.title}</b>
+              {/* A link's description is often its own title again, and saying it twice is
+                  worse than not saying it. */}
+              {r.description && r.description !== r.title && <small>{r.description}</small>}
+            </span>
+            <span className="note">{r.kind === 'link' ? 'link' : fileSize(r.size_bytes)}</span>
+          </button>
+        ))}
+        {rest.length === 0 && (
+          <p className="note" style={{ margin: 4 }}>
+            {term ? 'Nothing matches.' : 'Everything here is already attached.'}
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ExampleCard({
+  lesson,
+  resources,
+  picked,
+  onSave,
+  onDismissSuggestion,
+  onRetire,
+}: {
+  lesson: Lesson
+  resources: Options['resources']
+  picked: number[]
+  onSave?: (input: { id: number; question: string; answer: string; resourceIds: number[] }) => Promise<void>
+  /** Turn down a proposed wording so it stops being offered. */
+  onDismissSuggestion?: (id: number) => Promise<void>
+  onRetire: () => void
+}) {
+  const [question, setQuestion] = useState(lesson.question ?? '')
+  const [answer, setAnswer] = useState(lesson.answer)
+  const [ids, setIds] = useState<number[]>(picked)
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [picking, setPicking] = useState(false)
+  const [dismissing, setDismissing] = useState(false)
+  const [err, setErr] = useState('')
+
+  // In the order the workspace lists them, so two cards attaching the same pair read alike.
+  const chosen = resources
+    .filter((r) => ids.includes(r.id))
+    .map((r) => ({
+      key: String(r.id),
+      title: r.title,
+      href: r.kind === 'link' ? (r.url ?? '') : `/api/resource/${r.token}`,
+      mime: r.mime,
+      isFile: r.kind !== 'link',
+    }))
+
+  const same =
+    question === (lesson.question ?? '') &&
+    answer === lesson.answer &&
+    ids.length === picked.length &&
+    ids.every((i) => picked.includes(i))
+
+  const save = async () => {
+    if (!onSave) return
+    setSaving(true)
+    setErr('')
+    try {
+      await onSave({ id: lesson.id, question, answer, resourceIds: ids })
+      setSaved(true)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const toggle = (id: number) => {
+    setSaved(false)
+    setIds((was) => (was.includes(id) ? was.filter((i) => i !== id) : [...was, id]))
+  }
+
+  return (
+    <div className="card examplecard">
+      <label htmlFor={`q-${lesson.id}`}>When somebody asks</label>
+      <textarea
+        id={`q-${lesson.id}`}
+        rows={2}
+        value={question}
+        onChange={(e) => {
+          setQuestion(e.target.value)
+          setSaved(false)
+        }}
+      />
+      {/*
+        The same warning the answer gets, for the half that decides whether this example is
+        reached at all. A stored question naming a month that has gone is a worse match for what
+        a customer actually types, and it is shown to the model as the pairing to imitate.
+      */}
+      {looksStale(question) && (
+        <p className="warn" style={{ margin: '6px 0 0' }}>
+          This question names a date or a month. It is what an incoming message is matched against,
+          so it will keep pulling this example up for a time that has passed.
+        </p>
+      )}
+
+      <label htmlFor={`a-${lesson.id}`} style={{ marginTop: 10 }}>
+        Answer like this
+      </label>
+      <textarea
+        id={`a-${lesson.id}`}
+        rows={4}
+        value={answer}
+        onChange={(e) => {
+          setAnswer(e.target.value)
+          setSaved(false)
+        }}
+      />
+      {/*
+        Examples harvested before greetings were stripped. Flagged rather than rewritten:
+        somebody approved this wording, and quietly editing it under them is how a review
+        queue stops being trusted. New ones no longer arrive this way.
+      */}
+      {looksPersonal(answer) && (
+        <p className="warn" style={{ margin: '6px 0 0' }}>
+          This opens with a greeting, and it is shown to the bot while it answers other people.
+          Delete the greeting and it will read the same to everybody.
+        </p>
+      )}
+      {/*
+        The same argument one step on. A greeting is written to one person; a date is written to
+        one week. Both read fine for ever and stop being true.
+      */}
+      {looksStale(answer) && (
+        <p className="warn" style={{ margin: '6px 0 0' }}>
+          This names a date, a time or a price. It is shown to the bot months from now, and it will
+          be repeated as though it were still current.
+        </p>
+      )}
+      {/*
+        Offered, never applied. Pressing this fills the box; saving is still a separate, deliberate
+        act by the person who approved the original wording.
+      */}
+      {(() => {
+        /*
+         * Two halves, proposed independently, offered together.
+         *
+         * A question is rewritten rather than bracketed -- see migration 080 -- so the two read
+         * differently and are labelled differently. Either can be the only one there: an answer
+         * can be fine while its question names a month that has gone, which was twenty of one
+         * bot's eighty examples.
+         */
+        const newQuestion =
+          lesson.suggested_question && lesson.suggested_question !== question ? lesson.suggested_question : null
+        const newAnswer = lesson.suggested && lesson.suggested !== answer ? lesson.suggested : null
+        if (!newQuestion && !newAnswer) return null
+
+        return (
+          <div className="suggestion">
+            <p className="note" style={{ margin: 0 }}>Suggested wording, with what expires taken out:</p>
+            {newQuestion && (
+              <>
+                <p className="note" style={{ margin: '6px 0 0' }}>When somebody asks</p>
+                <p className="said" style={{ margin: '2px 0 0' }}>{newQuestion}</p>
+              </>
+            )}
+            {newAnswer && (
+              <>
+                {newQuestion && <p className="note" style={{ margin: '8px 0 0' }}>Answer like this</p>}
+                <p className="said" style={{ margin: newQuestion ? '2px 0 8px' : '6px 0 8px' }}>{newAnswer}</p>
+              </>
+            )}
+            <div className="row" style={{ gap: 8, marginTop: newAnswer ? 0 : 8 }}>
+              <button
+                className="ghost small"
+                onClick={() => {
+                  if (newQuestion) setQuestion(newQuestion)
+                  if (newAnswer) setAnswer(newAnswer)
+                  setSaved(false)
+                }}
+              >
+                Use this
+              </button>
+              {/*
+                And a way to say no that sticks.
+                
+                Without it the only way to be rid of a suggestion that adds nothing was to accept
+                it or scroll past it for ever -- and a queue you cannot clear is one people stop
+                reading. It records the same "looked at, nothing to change" state the backfill
+                writes, so the script will not propose this row again either.
+              */}
+              {onDismissSuggestion && (
+                <button
+                  className="ghost small"
+                  disabled={dismissing}
+                  title="Stop offering this wording. Your answer is not changed."
+                  onClick={() => {
+                    setDismissing(true)
+                    void onDismissSuggestion(lesson.id).catch((e) => {
+                      setErr(e instanceof Error ? e.message : String(e))
+                      setDismissing(false)
+                    })
+                  }}
+                >
+                  {dismissing ? 'Dismissing…' : 'No thanks'}
+                </button>
+              )}
+            </div>
+          </div>
+        )
+      })()}
+
+      {/*
+        What this answer sends, and nothing else.
+        
+        Every card used to list the whole workspace with a checkbox beside each row, so a bot
+        with forty files answered "what does this send?" by making somebody read forty rows on
+        every card. The badges are the answer; choosing is a different job and it happens in
+        its own sheet.
+      */}
+      <p className="sendrow" style={{ margin: '12px 0 0' }}>
+        <span className="note">{ids.length ? 'Sends with this answer' : 'Sends nothing with this answer'}</span>
+        <FileChips items={chosen} onCross={(key) => toggle(Number(key))} removes />
+        {resources.length > 0 && (
+          <button type="button" className="ghost small" onClick={() => setPicking(true)}>
+            {ids.length ? 'Attach more' : 'Attach a file or link'}
+          </button>
+        )}
+      </p>
+      {resources.length === 0 && (
+        <p className="note" style={{ margin: '6px 0 0' }}>
+          No files or links in this workspace yet. Add them under Knowledge and they will appear here.
+        </p>
+      )}
+      {picking && (
+        <AttachSheet all={resources} ids={ids} onToggle={toggle} onClose={() => setPicking(false)} />
+      )}
+
+      {err && (
+        <p className="err" style={{ marginBottom: 0 }}>
+          {err}
+        </p>
+      )}
+
+      <div className="row" style={{ marginTop: 12 }}>
+        <button type="button" className="small" disabled={saving || same || !onSave} onClick={save}>
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        {saved && same && <span className="pill ok">Saved</span>}
+        <button type="button" className="ghost small bad" style={{ marginLeft: 'auto' }} onClick={onRetire}>
+          Retire
+        </button>
+      </div>
+    </div>
+  )
+}
 
 /**
  * One product, corrected in place.

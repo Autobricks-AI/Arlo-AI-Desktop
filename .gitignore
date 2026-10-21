@@ -25,3 +25,29 @@ uploads
 # to write rules for: the one that matters is the day somebody drops a private key in here
 # and the next `git add -A` commits it.
 certs
+
+# Files moved out of Postgres when running outside Docker, where MEDIA_DIR has no volume
+# in front of it. Customers' own uploads: not secret exactly, but not ours to commit.
+.media
+
+# Local dev scratch, machine-specific: a heartbeat logger with a hardcoded log path, two
+# scripts that free a port and start the dev server, a throwaway query. None of them work on
+# anybody else's machine, and the point of naming them is that `git add -A` cannot sweep them
+# into a public repository.
+guard.mjs
+run.sh
+run.bat
+prog.tmp.mjs
+
+# What the depersonalise and generalise scripts save before they write: the originals, which
+# is customers' own words and their names. Named after the workspace and dropped beside
+# package.json, so it is one `git add -A` away from being published -- which is the same
+# failure the .env rule above is about, and it has happened.
+depersonalise-*.json
+generalise-*.json
+
+# Working notes. Not secret values, but they map the role setup and record which credentials
+# are compromised and awaiting rotation, which is not something to hand a reader of a public
+# repository.
+TODO.txt
+notes.txt

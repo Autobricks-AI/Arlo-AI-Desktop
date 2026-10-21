@@ -58,11 +58,21 @@ export const clampPages = (n: unknown) => {
 // ---------------------------------------------------------------- reading
 
 export const list = (workspaceId: number, baseId?: number) =>
-  all<Site & { pages: number; passages: number }>(
+  all<Site & { pages: number; passages: number; edited: number; edited_since: string | null }>(
     `SELECT s.*,
             (SELECT count(*)::int FROM documents d WHERE d.site_id = s.id) AS pages,
             (SELECT count(*)::int FROM chunks c
-               JOIN documents d ON d.id = c.document_id WHERE d.site_id = s.id) AS passages
+               JOIN documents d ON d.id = c.document_id WHERE d.site_id = s.id) AS passages,
+            /*
+             * Pages on this domain somebody has corrected by hand since it was last crawled.
+             *
+             * Per site rather than per workspace because the question is always about one
+             * domain: these pages no longer say what the website says, and crawling it again
+             * would put the website's version back. The page shows that standing, and asks
+             * before the crawl that would undo it.
+             */
+            (SELECT count(*)::int FROM documents d WHERE d.site_id = s.id AND d.edited_at IS NOT NULL) AS edited,
+            (SELECT min(d.edited_at) FROM documents d WHERE d.site_id = s.id) AS edited_since
        FROM sites s
       WHERE s.workspace_id = ? AND (?::int IS NULL OR s.base_id = ?)
       ORDER BY s.created_at DESC`,

@@ -1,6 +1,6 @@
 import { createStartHandler, defaultStreamHandler } from '@tanstack/react-start/server'
 import { authenticate, secureCookies, usingDefaultPassword } from './server/auth.ts'
-import { migrate, withWorkspace } from './server/db.ts'
+import { assertOwnDatabase, migrate, withWorkspace } from './server/db.ts'
 import { resume } from './server/channels/whatsapp.ts'
 import { startPolling } from './server/poller.ts'
 import { recover as recoverCrawls } from './server/sites.ts'
@@ -24,6 +24,20 @@ import { resumePolling as resumeTelegram } from './server/channels/telegram.ts'
  * advisory lock, so WhatsApp and the poller still start exactly once across every process
  * pointed at this database, not once per process. See singleton.ts.
  */
+/*
+ * Before anything else, and outside the block below on purpose.
+ *
+ * Every process checks, not only the one that migrates. A worker never calls migrate() and
+ * never sweeps, but it does serve pages, and serving somebody else's Arlo is exactly what is
+ * being refused -- so the check belongs ahead of the fork, in all of them. It is one query.
+ *
+ * A throw here aborts the rest of this module, and that is what stops the poller:
+ * `startPolling` is inside the block below, and a module body that threw never reaches it.
+ * Load-bearing rather than incidental -- under `vite dev` a throw leaves the process alive and
+ * still serving, so a guard that only stopped migrate() would let the sweeps run anyway.
+ */
+await assertOwnDatabase()
+
 if (ownsSingletons) {
   // Applied here rather than as a side effect of importing a module, so there is one
   // place it happens and no window where a worker serves against a stale schema. Safe to

@@ -1,9 +1,10 @@
 import { useState } from 'react'
+import { Pager } from '../components/Pager'
 import { createFileRoute, useRouter } from '@tanstack/react-router'
 import { createServerFn, useServerFn } from '@tanstack/react-start'
 import { changeCredentials, providerSettings, requireSession, setProvider, usingDefaultPassword } from '../server/auth'
 import { byBot as llmByBot, byModel as llmByModel, spend as llmSpend, usage as llmUsage } from '../server/llm'
-import { asSGD, estimateSGD, pageOf } from '../types'
+import { pageOf } from '../types'
 
 const load = createServerFn({ method: 'GET' }).handler(async () => {
   const s = await requireSession()
@@ -116,7 +117,7 @@ function Settings() {
                     <tr>
                       <th>Provider</th>
                       <th>Tokens</th>
-                      <th>Cost</th>
+                      <th>Credits</th>
                       <th>Last used</th>
                     </tr>
                   </thead>
@@ -125,7 +126,7 @@ function Settings() {
                       <tr key={u.provider}>
                         <td>{u.provider === 'autobricks' ? 'Autobricks' : u.provider}</td>
                         <td>{u.tokens.toLocaleString()}</td>
-                        <td>{asSGD(estimateSGD(u.tokens, u.prompt))}</td>
+                        <td><Credits r={u} /></td>
                         <td className="note">{new Date(u.last_at).toLocaleString()}</td>
                       </tr>
                     ))}
@@ -151,7 +152,7 @@ function Settings() {
                         <th>What for</th>
                         <th>Calls</th>
                         <th>Tokens</th>
-                        <th>Cost</th>
+                        <th>Credits</th>
                         <th>Each</th>
                       </tr>
                     </thead>
@@ -161,13 +162,15 @@ function Settings() {
                           <td>{PURPOSES[s.purpose] ?? s.purpose}</td>
                           <td>{s.calls.toLocaleString()}</td>
                           <td>{s.tokens.toLocaleString()}</td>
-                          <td>{asSGD(estimateSGD(s.tokens, s.prompt))}</td>
-                          {/* Per call, priced at the row's own input/output mix rather than
-                              re-deriving it: dividing the row's cost by its call count keeps
-                              the split honest without carrying a second pair of sums. */}
+                          <td><Credits r={s} /></td>
+                          {/* Per call, divided out of the figure beside it rather than summed
+                              separately, so the two cells cannot disagree. Where the charge is
+                              a per-request minimum this average is what reveals it: a row of
+                              short calls averages almost exactly one credit each. */}
                           <td className="note">
-                            {s.per_call.toLocaleString()} ·{' '}
-                            {asSGD(estimateSGD(s.tokens, s.prompt) / Math.max(1, s.calls))}
+                            {s.per_call.toLocaleString()}
+                            {s.credits != null &&
+                              ` · ${Math.round((s.credits / Math.max(1, s.calls)) * 100) / 100} cr`}
                           </td>
                         </tr>
                       ))}
@@ -193,7 +196,7 @@ function Settings() {
                         <th>Model</th>
                         <th>Calls</th>
                         <th>Tokens</th>
-                        <th>Cost</th>
+                        <th>Credits</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -213,7 +216,7 @@ function Settings() {
                           </td>
                           <td>{m.calls.toLocaleString()}</td>
                           <td>{m.tokens.toLocaleString()}</td>
-                          <td>{asSGD(estimateSGD(m.tokens, m.prompt))}</td>
+                          <td><Credits r={m} /></td>
                         </tr>
                       ))}
                     </tbody>
@@ -244,7 +247,7 @@ function Settings() {
                         <th>Chatbot</th>
                         <th>Share</th>
                         <th>Tokens</th>
-                        <th>Cost</th>
+                        <th>Credits</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -263,7 +266,7 @@ function Settings() {
                               <span className="note"> {share}%</span>
                             </td>
                             <td>{b.tokens.toLocaleString()}</td>
-                            <td>{asSGD(estimateSGD(b.tokens, b.prompt))}</td>
+                            <td><Credits r={b} /></td>
                           </tr>
                         )
                       })}
@@ -277,23 +280,25 @@ function Settings() {
             <p className="note">Nothing recorded yet — this fills in the first time a bot answers.</p>
           )}
 
-          {/*
-            Said once, under all of them, because a money column with no provenance is one
-            somebody will try to reconcile against an invoice and then distrust the page over.
-          */}
-          {usage.length > 0 && (
-            <p className="note" style={{ maxWidth: '62ch' }}>
-              Costs are estimates — hence the <strong>~</strong>. Worked out from the standard rate for the model
-              everything defaults to, converted at a fixed S$1.35 to the dollar, with the 1.5× margin applied. A
-              bot pointed at a larger model costs more than this shows, and the exchange rate moves. Read it as a
-              sense of scale, not a bill. Everything but "By provider" covers the last 30 days.
-            </p>
-          )}
         </>
       )}
     </>
   )
 }
+
+/**
+ * What the provider charged, in its own unit.
+ *
+ * Credits rather than converted money, because credits are the exact figure: the provider
+ * bills whole credits per request with a minimum of one, and the conversion to dollars was a
+ * fixed rate that moves -- so the money column was the only approximate thing on a page whose
+ * point is reconciling against the account.
+ *
+ * Null is a call made before the provider reported its charge, and says so rather than
+ * showing a zero somebody would add up.
+ */
+const Credits = ({ r }: { r: { credits: number | null } }) =>
+  r.credits == null ? <span className="note">not recorded</span> : <>{r.credits.toLocaleString()} cr</>
 
 /**
  * What each kind of call is, in words somebody paying for it would use.
@@ -305,6 +310,7 @@ function Settings() {
 const PURPOSES: Record<string, string> = {
   answer: 'Answering a customer',
   tool_round: 'Looking something up mid-answer',
+  file_check: 'Checking a file belongs with the answer',
   contact: 'Reading a conversation for what the customer said about themselves',
   identity: 'Working out what the company does',
   catchup: 'Summarising a conversation',
@@ -549,30 +555,3 @@ function usePage<T>(rows: T[], size = 5) {
   return { shown: rows.slice(from, to), at, pages, setPage }
 }
 
-/**
- * Previous and next, shown only when there is somewhere to go.
- *
- * A single-page table gets nothing — controls that are always disabled are furniture, and
- * three of these four tables usually have three rows.
- */
-function Pager({ at, pages, setPage }: { at: number; pages: number; setPage: (n: number) => void }) {
-  if (pages < 2) return null
-  return (
-    <div className="row" style={{ justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
-      <button className="ghost small" disabled={at === 0} onClick={() => setPage(at - 1)} aria-label="Previous page">
-        ‹
-      </button>
-      <span className="note">
-        {at + 1} of {pages}
-      </span>
-      <button
-        className="ghost small"
-        disabled={at >= pages - 1}
-        onClick={() => setPage(at + 1)}
-        aria-label="Next page"
-      >
-        ›
-      </button>
-    </div>
-  )
-}

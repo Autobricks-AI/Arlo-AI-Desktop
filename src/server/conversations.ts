@@ -6,6 +6,7 @@
  * a second message from the same person opening a second thread.
  */
 import { all, insert, isUniqueViolation, one, run, tx } from './db.ts'
+import { INBOX_PAGE } from '../types.ts'
 import type { Status } from '../types.ts'
 
 // One definition, in the file the browser is allowed to import.
@@ -28,6 +29,14 @@ export type Conversation = {
    * measured from — only messages newer than this can teach anything. NULL means never.
    */
   harvested_at: string | null
+  /**
+   * Answer this one thread, whatever mode the bot is in.
+   *
+   * For watching what a bot has learned without it answering every other customer at the same
+   * time. `status` cannot say this: a draft-mode bot is happy to hold a thread and still send
+   * nothing. Off unless somebody turned it on, and it stays on until somebody turns it off.
+   */
+  answers_live: boolean
 }
 
 export type Cite = { chunk_id: number; document_id: number; title: string; uri: string | null }
@@ -233,6 +242,53 @@ export const messages = (workspaceId: number, conversationId: number, limit = 20
     limit,
   )
 
+/**
+ * The window before a message, for the thread that does not fit in one.
+ *
+ * A transcript is not a table and does not get page numbers — it gets a "load older" control
+ * at the top, which is the only shape that keeps a conversation reading downwards. A thread
+ * that has run for months holds thousands of messages; without this, everything past the
+ * window was simply absent from the UI with no way to ask for it.
+ *
+ * Keyset, not OFFSET, and that is not a preference: new messages arrive at the *newest* end
+ * while somebody reads backwards from a fixed point, so an offset counted from the top would
+ * shift under every reply and quietly re-show or skip a message. A cursor of
+ * `(created_at, id)` is anchored to a message rather than to a position.
+ *
+ * `id` is in the cursor because `created_at` is not unique — a bot answering fast files two
+ * messages in the same millisecond, and a cursor on the timestamp alone would either loop on
+ * them forever or step over one.
+ */
+export const before = (
+  workspaceId: number,
+  conversationId: number,
+  cursor: { at: string; id: number },
+  limit = 200,
+) =>
+  all<Message>(
+    `SELECT * FROM (
+        SELECT * FROM messages
+         WHERE workspace_id = ? AND conversation_id = ?
+           AND (created_at, id) < (?::timestamptz, ?)
+         ORDER BY created_at DESC, id DESC LIMIT ?
+      ) older ORDER BY created_at, id`,
+    workspaceId,
+    conversationId,
+    cursor.at,
+    cursor.id,
+    limit,
+  )
+
+/** How many messages a thread holds, so the UI can say whether there are older ones. */
+export const messageCount = async (workspaceId: number, conversationId: number) =>
+  (
+    await one<{ n: number }>(
+      `SELECT count(*)::int AS n FROM messages WHERE workspace_id = ? AND conversation_id = ?`,
+      workspaceId,
+      conversationId,
+    )
+  )?.n ?? 0
+
 /** The last few turns, oldest first — what the model is given as the conversation so far. */
 export const recent = async (workspaceId: number, conversationId: number, turns = 10) =>
   (
@@ -247,8 +303,20 @@ export const recent = async (workspaceId: number, conversationId: number, turns 
 
 export async function setStatus(workspaceId: number, id: number, status: Status, assignee?: string | null) {
   const { changes } = await run(
-    `UPDATE conversations SET status = ?, assignee = ? WHERE workspace_id = ? AND id = ?`,
+    /*
+     * A person claiming the thread turns the override off with it.
+     *
+     * Somebody who takes a conversation over should not leave a switch armed behind them: the
+     * reply gate would keep out anyway while `assignee` is set, but the moment the thread was
+     * handed back the bot would start answering again for a reason nobody remembered choosing.
+     * Only a real claim clears it -- the bot handing a thread on sets `assignee` to null, and
+     * that is most of what draft mode does all day.
+     */
+    `UPDATE conversations SET status = ?, assignee = ?,
+            answers_live = CASE WHEN ?::text IS NULL THEN answers_live ELSE false END
+      WHERE workspace_id = ? AND id = ?`,
     status,
+    assignee ?? null,
     assignee ?? null,
     workspaceId,
     id,
@@ -256,32 +324,170 @@ export async function setStatus(workspaceId: number, id: number, status: Status,
   if (!changes) throw new Error('No such conversation')
 }
 
-/** The inbox: every thread, with who it is with and what was last said. */
-export const inbox = (workspaceId: number, status?: Status, botId?: number) =>
-  all<
-    Conversation & { customer_name: string | null; customer_email: string | null; last_body: string | null; unread: number }
-  >(
+/**
+ * Answer this one thread live, or stop.
+ *
+ * Deliberately its own call rather than a flag on setStatus: turning it on is not a change of
+ * who holds the conversation, and the two get written at different moments.
+ */
+export async function setAnswersLive(workspaceId: number, id: number, on: boolean) {
+  const { changes } = await run(
+    `UPDATE conversations SET answers_live = ? WHERE workspace_id = ? AND id = ?`,
+    on,
+    workspaceId,
+    id,
+  )
+  if (!changes) throw new Error('No such conversation')
+}
+
+export type Threaded = Conversation & {
+  customer_name: string | null
+  customer_email: string | null
+  last_body: string | null
+  unread: number
+  /**
+   * When the customer last wrote. Null when they never have.
+   *
+   * Not `last_at`, which our own replies advance — the WhatsApp 24-hour window runs on this
+   * and only this, so a thread answered a minute ago can still be hours past it. Derived
+   * rather than stored; see 075_window.sql for why there is no column.
+   */
+  last_in_at: string | null
+}
+
+/**
+ * The last thing the customer said, as a scalar.
+ *
+ * One expression, three call sites — the inbox list, the open thread and the cold filter.
+ * Written down once because a partial index is only used when the predicate matches, and
+ * `messages_inbound` is partial on `direction = 'in'`.
+ */
+const LAST_IN = `(SELECT max(m.created_at) FROM messages m
+                    WHERE m.conversation_id = v.id AND m.direction = 'in')`
+
+/**
+ * How long WhatsApp carries a free reply after the customer's last message.
+ *
+ * Meta's number, and Meta stays the authority — nothing here refuses a send. See
+ * 075_window.sql, and 059_whatsapp_cloud.sql:30 for why there is no column.
+ */
+export const WINDOW = '24 hours'
+
+/**
+ * Past the window, so only an approved template will now reach them.
+ *
+ * WhatsApp Business alone. A linked handset is the same `whatsapp` channel and has no window
+ * at all, so the `wc_` test is not a detail — a connector that cannot go cold must never be
+ * filtered as though it could. A thread with no inbound message never opened a window, hence
+ * the epoch.
+ */
+export const coldSql = `split_part(v.channel_ref, ':', 1) LIKE 'wc\\_%'
+   AND coalesce(${LAST_IN}, 'epoch'::timestamptz) < now() - interval '${WINDOW}'`
+
+
+
+/**
+ * The inbox: threads, with who each is with and what was last said.
+ *
+ * It used to take the newest 200 and stop, with no page and no notice — thread 201 was simply
+ * unreachable and nobody was told. Worse, the page then filtered those 200 again in the
+ * browser by status and channel while `counts()` counted the whole table, so the chips and the
+ * list disagreed the moment a workspace passed the cap. The comment on `counts()` already said
+ * why that is unacceptable; this is that comment being honoured.
+ *
+ * So both filters are here now, beside the count that has to agree with them, and the caller
+ * gets a total rather than a silent truncation.
+ *
+ * The order ends in `id`. `last_at` is not unique — an import stamps a whole history at once —
+ * and without a tiebreaker an OFFSET page can repeat or skip threads. See 065_paging.sql.
+ */
+export async function inbox(
+  workspaceId: number,
+  opts: {
+    status?: Status
+    channel?: string
+    /**
+     * Which connections, by the id in front of every `channel_ref`.
+     *
+     * One mechanism for two questions a person actually asks — "only this number" is a list
+     * of one, and "only WhatsApp Business" is the list of connections that connector owns.
+     * The caller resolves which, because it is the side that knows what a connector is.
+     */
+    connections?: string[]
+    /** Name, number, address — anything the contacts box already matches on. */
+    find?: string
+    /** Only the threads past the WhatsApp 24-hour window, or only the ones inside it. */
+    cold?: boolean
+    botId?: number
+    page?: number
+    size?: number
+  } = {},
+): Promise<{ rows: Threaded[]; total: number }> {
+  const size = Math.min(Math.max(1, opts.size ?? INBOX_PAGE), 200)
+  const status = opts.status ?? null
+  const channel = opts.channel ?? null
+  /*
+   * Which bot's threads. Filtered on the stamp the conversation carries rather than by
+   * re-running the routing rules: a widget reassigned to another bot last week must not
+   * rewrite who answered the conversations before it moved.
+   */
+  const botId = opts.botId ?? null
+
+  // Empty means no filter rather than no rows: an absent list and a list of nothing are the
+  // same request, and the second is what a caller sends by accident.
+  const connections = opts.connections?.length ? opts.connections : null
+
+  /*
+   * The same haystack the contacts box searches, and for the same reason it was built.
+   *
+   * `customers.search` is a stored, trigram-indexed column over name, company, email, phone
+   * and the rest — so "find Perry's thread" and "find the thread for 8852" are one clause
+   * here rather than a second search implementation that drifts out of step with the first.
+   * `channel_ref` is the extra arm: a number that wrote in before anybody filled in the CRM
+   * record is in the thread's address and nowhere else yet.
+   *
+   * % and _ escaped, so somebody searching for "50%" is not handed the whole inbox.
+   */
+  const find = opts.find?.trim().toLowerCase() || null
+  const like = find ? `%${find.replace(/[\\%_]/g, (m) => `\\${m}`)}%` : null
+
+  const cold = opts.cold ?? null
+
+  const from = `conversations v JOIN customers c ON c.id = v.customer_id`
+  const where = `v.workspace_id = ? AND (?::text IS NULL OR v.status = ?)
+                   AND (?::text IS NULL OR v.channel = ?)
+                   AND (?::int IS NULL OR v.bot_id = ?)
+                   AND (?::text[] IS NULL OR split_part(v.channel_ref, ':', 1) = ANY(?::text[]))
+                   AND (?::text IS NULL OR c.search LIKE ? ESCAPE '\\' OR lower(v.channel_ref) LIKE ? ESCAPE '\\')
+                   AND (?::bool IS NULL OR (${coldSql}) = ?)`
+  const args = [workspaceId, status, status, channel, channel, botId, botId, connections, connections, like, like, like, cold, cold]
+
+  const totals = await one<{ n: number }>(
+    `SELECT count(*)::int AS n FROM ${from} WHERE ${where}`,
+    ...args,
+  )
+  const total = totals?.n ?? 0
+
+  const pages = Math.max(1, Math.ceil(total / size))
+  const at = Math.min(Math.max(0, opts.page ?? 0), pages - 1)
+
+  const rows = await all<Threaded>(
     `SELECT v.*, c.name AS customer_name, c.email AS customer_email,
             (SELECT m.body FROM messages m WHERE m.conversation_id = v.id
               ORDER BY m.created_at DESC, m.id DESC LIMIT 1) AS last_body,
-            (SELECT count(*)::int FROM messages m WHERE m.conversation_id = v.id) AS unread
-       FROM conversations v
-       JOIN customers c ON c.id = v.customer_id
-      WHERE v.workspace_id = ? AND (?::text IS NULL OR v.status = ?)
-        AND (?::int IS NULL OR v.bot_id = ?)
-      ORDER BY v.last_at DESC
-      LIMIT 200`,
-    workspaceId,
-    status ?? null,
-    status ?? null,
-    /*
-     * Which bot's threads. Filtered on the stamp the conversation carries rather than by
-     * re-running the routing rules: a widget reassigned to another bot last week must not
-     * rewrite who answered the conversations before it moved.
-     */
-    botId ?? null,
-    botId ?? null,
+            (SELECT count(*)::int FROM messages m WHERE m.conversation_id = v.id) AS unread,
+            ${LAST_IN} AS last_in_at
+       FROM ${from}
+      WHERE ${where}
+      ORDER BY v.last_at DESC, v.id DESC
+      LIMIT ? OFFSET ?`,
+    ...args,
+    size,
+    at * size,
   )
+
+  return { rows, total }
+}
 
 /**
  * Every thread with one person, newest first.
@@ -309,6 +515,23 @@ export const byCustomer = (workspaceId: number, customerId: number) =>
  * Takes the same bot filter the list does, and has to: a chip reading "6" above a list
  * showing two is not a count, it is a bug report from the user's point of view.
  */
+/**
+ * When the customer last wrote on one thread.
+ *
+ * The same fact `inbox()` derives per row, for the thread somebody has open — which is often
+ * not on the page the list is showing, so it cannot borrow the row's value. One indexed
+ * lookup on `messages_inbound`.
+ */
+export const lastInboundAt = async (workspaceId: number, conversationId: number) =>
+  (
+    await one<{ at: string | null }>(
+      `SELECT max(created_at) AS at FROM messages
+        WHERE workspace_id = ? AND conversation_id = ? AND direction = 'in'`,
+      workspaceId,
+      conversationId,
+    )
+  )?.at ?? null
+
 export const counts = async (workspaceId: number, botId?: number) =>
   (await one<{ bot: number; human: number; closed: number }>(
     `SELECT count(*) FILTER (WHERE status = 'bot')::int    AS bot,
@@ -321,13 +544,20 @@ export const counts = async (workspaceId: number, botId?: number) =>
   ))!
 
 /**
- * Mark these threads as backfill, and as already looked at.
+ * Mark these threads as backfill, and as already read for training.
  *
- * Three columns, three jobs. `imported_at` says the thread came from a phone's history rather
- * than from live traffic — the inbox shows it, and a bulk "read these for training" acts on
- * it. The other two are what keep an import quiet: both sweeps ask whether anything has
- * happened since they last looked, so stamping them now means a thread whose newest message
- * is older than this moment is not due.
+ * `imported_at` says the thread came from a phone's history rather than from live traffic —
+ * the inbox shows it, and a bulk "read these for training" acts on it. `harvested_at` is
+ * what keeps the import quiet: the training sweep asks whether anything has happened since
+ * it last looked, so stamping it now means a thread whose newest message is older than this
+ * moment is not due.
+ *
+ * `judged_at` used to be stamped here too and is not any more. It made linking a phone
+ * import several hundred conversations, create several hundred contacts, and leave the
+ * sales board empty — every one of them marked as already judged before anything had read a
+ * word. Where these people got to is the most useful thing about them, they are put on the
+ * board at import time, and the qualify sweep works through them twenty at a time. Training
+ * on what was said stays opt-in; sorting the board does not.
  *
  * Deliberately not "never read these". A live message on an imported thread pushes `last_at`
  * past the stamp and it becomes due like any other, which is what should happen — the
@@ -337,8 +567,7 @@ export const markImported = (workspaceId: number, ids: number[]) =>
   run(
     `UPDATE conversations
         SET imported_at = COALESCE(imported_at, now()),
-            harvested_at = GREATEST(COALESCE(harvested_at, now()), now()),
-            judged_at = GREATEST(COALESCE(judged_at, now()), now())
+            harvested_at = GREATEST(COALESCE(harvested_at, now()), now())
       WHERE workspace_id = ? AND id = ANY(?::int[])`,
     workspaceId,
     ids,
@@ -362,14 +591,17 @@ export const markImported = (workspaceId: number, ids: number[]) =>
  * question came in on, which is the half that matters. The customer rows themselves are
  * untouched; a person is not their WhatsApp thread.
  */
-export const removeConnection = (workspaceId: number, channel: string, connectionRef: string) =>
-  run(
+export const removeConnection = async (workspaceId: number, channel: string, connectionRef: string) => {
+  const gone = await all<{ customer_id: number }>(
     `DELETE FROM conversations
-      WHERE workspace_id = ? AND channel = ? AND split_part(channel_ref, ':', 1) = ?`,
+      WHERE workspace_id = ? AND channel = ? AND split_part(channel_ref, ':', 1) = ?
+      RETURNING customer_id`,
     workspaceId,
     channel,
     connectionRef,
   )
+  return { changes: gone.length }
+}
 
 /**
  * Put a backfilled thread back where it belongs in time.
@@ -408,6 +640,7 @@ export const datePlacedFromMessages = (workspaceId: number, ids: number[]) =>
     workspaceId,
   )
 
+
 /**
  * Threads on one channel whose connection is not in the list of live ones.
  *
@@ -418,15 +651,18 @@ export const datePlacedFromMessages = (workspaceId: number, ids: number[]) =>
  * `<> ALL` rather than `NOT IN`, because `NOT IN` against an empty set is a different
  * question in SQL and one that quietly matches nothing.
  */
-export const removeUnreachable = (workspaceId: number, channel: string, live: string[]) =>
-  run(
+export const removeUnreachable = async (workspaceId: number, channel: string, live: string[]) => {
+  const gone = await all<{ customer_id: number }>(
     `DELETE FROM conversations
       WHERE workspace_id = ? AND channel = ?
-        AND split_part(channel_ref, ':', 1) <> ALL(?::text[])`,
+        AND split_part(channel_ref, ':', 1) <> ALL(?::text[])
+      RETURNING customer_id`,
     workspaceId,
     channel,
     live,
   )
+  return { changes: gone.length }
+}
 
 /**
  * Give backfilled threads the bot that owns the connection they arrived on.
@@ -448,48 +684,55 @@ export const adoptBot = (workspaceId: number, ids: number[], botId: number) =>
   )
 
 /**
- * Let the sweeps read imported threads after all.
+ * Give ownerless threads the bot that answers their connection now.
+ *
+ * `bot_id` is normally stamped by the agent, on the thread it actually answered
+ * (`agent.ts`). A backfilled thread is never answered — that is exactly what `answer: false`
+ * is for — so nothing stamps it when the number is linked before anybody assigns it to a
+ * chatbot, which is the ordinary order to do those two things in.
+ *
+ * Everything downstream joins on that column: `lessons.sweep()` for training, `sweepQualify`
+ * for the board. An inner join drops a null silently, so those threads sat there owned by
+ * nobody, read by nothing, and their contacts never reached a board. Assigning the
+ * connection is the moment the answer changes, so `bot.ts` calls this from the save.
+ *
+ * Resolved per thread rather than per workspace, because a workspace may have several
+ * numbers on several bots. `channel_ref` is `<connection>:<thread>`, and `bot_channels` maps
+ * the connection half to its bot — the same lookup `bots.routeTo()` does, in one statement
+ * rather than a query per thread.
+ *
+ * Only where it is null. A thread that has been answered belongs to the bot that answered
+ * it, and routing is a setting somebody may have changed since — the same reason `agent.ts`
+ * records the answering bot rather than recomputing it.
+ */
+export const claimThreads = (workspaceId: number) =>
+  run(
+    `UPDATE conversations c
+        SET bot_id = k.bot_id
+       FROM bot_channels k
+      WHERE c.workspace_id = ? AND c.bot_id IS NULL
+        AND k.workspace_id = c.workspace_id
+        AND k.channel = c.channel
+        AND k.connection_ref = split_part(c.channel_ref, ':', 1)`,
+    workspaceId,
+  )
+
+/**
+ * Let the training sweep read imported threads after all.
  *
  * Clearing the harvest stamp rather than reading them here: reading is a model call per
  * thread and there may be hundreds, so this queues them and the sweep works through them at
  * its own pace. The same shape as `projects.recheck()`, and for the same reason — a button
  * that holds a request open for three hundred model calls is a button that times out.
  *
- * `judged_at` is left alone. Old conversations should not start populating a sales board with
- * people who stopped talking a year ago; training on what was said is a different question
- * from where they belong today.
+ * Only the harvest stamp, because only that one is set against an import. The board is not
+ * opt-in in the same way: an imported thread is left due for the qualify sweep when it is
+ * filed, so these people are already on a board and already sorted by the time anybody
+ * decides whether the bot should learn from what was said.
  */
 export async function readImported(workspaceId: number): Promise<number> {
-  /*
-   * Give them an owner first, or clearing the stamp achieves nothing.
-   *
-   * `bot_id` is normally stamped by the agent, on the thread it actually answered
-   * (`agent.ts`). A backfilled thread is never answered — that is exactly what
-   * `answer: false` is for — so nothing stamps it, and `lessons.sweep()` joins
-   * `conversations` to `bots` on that column. An inner join drops every row where it is
-   * null, silently: the threads sat queued with `harvested_at IS NULL` and the sweep could
-   * not see one of them. Importing chats so a bot can learn from them, and then never
-   * letting it read them, is the whole feature failing closed.
-   *
-   * Resolved per thread rather than per workspace, because a workspace may have several
-   * numbers on several bots. `channel_ref` is `<connection>:<thread>`, and `bot_channels`
-   * maps the connection half to its bot — the same lookup `bots.routeTo()` does, in one
-   * statement rather than a query per thread.
-   *
-   * Only where it is null. A thread that has been answered belongs to the bot that answered
-   * it, and routing is a setting somebody may have changed since — the same reason
-   * `agent.ts` records the answering bot rather than recomputing it.
-   */
-  await run(
-    `UPDATE conversations c
-        SET bot_id = k.bot_id
-       FROM bot_channels k
-      WHERE c.workspace_id = ? AND c.imported_at IS NOT NULL AND c.bot_id IS NULL
-        AND k.workspace_id = c.workspace_id
-        AND k.channel = c.channel
-        AND k.connection_ref = split_part(c.channel_ref, ':', 1)`,
-    workspaceId,
-  )
+  // An owner first, or clearing the stamp achieves nothing — the sweep joins on `bot_id`.
+  await claimThreads(workspaceId)
 
   const { changes } = await run(
     `UPDATE conversations SET harvested_at = NULL, harvest_attempts = 0

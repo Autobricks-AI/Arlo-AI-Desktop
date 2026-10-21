@@ -86,6 +86,10 @@ const allowSender = createServerFn({ method: 'POST' })
       : telegram.revoke(s.workspaceId, data.botId, data.sender)
   })
 
+const setBotOpen = createServerFn({ method: 'POST' })
+  .validator((d: { botId: string; open: boolean }) => d)
+  .handler(async ({ data }) => telegram.setOpen((await requireSession()).workspaceId, data.botId, data.open))
+
 // ---------------------------------------------------------------- whatsapp
 
 const linkWhatsapp = createServerFn({ method: 'POST' })
@@ -456,6 +460,8 @@ function Bots({ data, statOf }: { data: Data; statOf: StatOf }) {
   const drop = useServerFn(dropBot)
   const retry = useServerFn(retryBot)
   const allow = useServerFn(allowSender)
+  // Named for the call, not the column: `open` above is already this component's add-form state.
+  const reach = useServerFn(setBotOpen)
   const { busy, err, act, router } = useAct()
   const [open, setOpen] = useState(false)
   const [configuring, setConfiguring] = useState<Data['telegram'][number] | null>(null)
@@ -472,15 +478,18 @@ function Bots({ data, statOf }: { data: Data; statOf: StatOf }) {
     <div style={{ marginTop: 16 }}>
       {data.telegram.map((b) => (
         <div key={b.id} className="acctrow">
-          <span className={`dot ${b.allowed.length ? 'on' : 'off'}`} />
+          <span className={`dot ${b.open || b.allowed.length ? 'on' : 'off'}`} />
           <div className="acctwho">
             <h3 style={{ marginBottom: 0 }}>{b.label}</h3>
             <p className="note" style={{ margin: 0 }}>
               {b.username ? `@${b.username}` : 'Handle unknown'} ·{' '}
-              {b.allowed.length
-                ? `${b.allowed.length} allowed sender${b.allowed.length === 1 ? '' : 's'}`
-                : 'nobody allowed yet — it answers nothing'}
-              {b.pending.length > 0 && ` · ${b.pending.length} waiting to be let in`}
+              {b.open
+                ? 'open to anyone'
+                : b.allowed.length
+                  ? `${b.allowed.length} allowed sender${b.allowed.length === 1 ? '' : 's'}`
+                  : 'nobody allowed yet — it answers nothing'}
+              {/* Nobody is waiting to be let in when the door is not shut. */}
+              {!b.open && b.pending.length > 0 && ` · ${b.pending.length} waiting to be let in`}
             </p>
             <p className="note" style={{ margin: 0 }}>
               {traffic(statOf('telegram', b.id))}
@@ -534,7 +543,14 @@ function Bots({ data, statOf }: { data: Data; statOf: StatOf }) {
       )}
 
       {open && <TelegramModal add={(arg) => add({ data: arg })} onClose={close} />}
-      {configuring && <TelegramConfig bot={configuring} allow={(arg) => allow({ data: arg })} onClose={close} />}
+      {configuring && (
+        <TelegramConfig
+          bot={configuring}
+          allow={(arg) => allow({ data: arg })}
+          setOpen={(arg) => reach({ data: arg })}
+          onClose={close}
+        />
+      )}
 
       {removing && (
         <ConfirmRemove

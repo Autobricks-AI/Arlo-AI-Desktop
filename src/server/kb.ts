@@ -115,8 +115,13 @@ export async function store(
     let documentId: number
     if (existing) {
       await run(
+        /*
+         * `edited_at = NULL` because this is the moment a hand edit stops being true: the text
+         * somebody wrote has just been replaced by whatever the live page says now. Leaving the
+         * flag set would have the page claim an edit that no longer exists.
+         */
         `UPDATE documents SET title = ?, mime = ?, text = ?, hash = ?, site_id = COALESCE(?, site_id),
-                base_id = ?, status = 'ready', error = NULL, updated_at = now()
+                base_id = ?, status = 'ready', error = NULL, updated_at = now(), edited_at = NULL
           WHERE id = ?`,
         doc.title,
         doc.mime,
@@ -312,9 +317,9 @@ export async function addUpload(
  * any size would ship megabytes of prose to render a table of titles.
  */
 export const listDocuments = (workspaceId: number, baseId?: number) =>
-  all<Document & { chunks: number; site_id: number | null; base_id: number }>(
+  all<Document & { chunks: number; site_id: number | null; base_id: number; edited_at: string | null }>(
     `SELECT d.id, d.source, d.uri, d.title, d.mime, d.hash, d.status, d.error, d.site_id, d.base_id,
-            d.created_at, d.updated_at,
+            d.created_at, d.updated_at, d.edited_at,
             (SELECT count(*)::int FROM chunks c WHERE c.document_id = d.id) AS chunks
        FROM documents d
       WHERE d.workspace_id = ? AND (?::int IS NULL OR d.base_id = ?)
@@ -342,6 +347,85 @@ export const passagesOf = (workspaceId: number, documentId: number) =>
     documentId,
   )
 
+/** As many hits as a person will read before narrowing the search instead. */
+export const FOUND_LIMIT = 60
+
+/** A passage somebody searched for, and enough around the hit to recognise it. */
+export type Found = {
+  id: number
+  document_id: number
+  ord: number
+  title: string
+  uri: string | null
+  source: string
+  edited_at: string | null
+  excerpt: string
+}
+
+/**
+ * Where does this knowledge base actually say that?
+ *
+ * The question somebody asks after a bot says something surprising. Answering it used to mean
+ * opening pages one at a time and reading them -- a bot quoted a course that had been
+ * discontinued, and finding the sentence meant going through nineteen crawled pages by hand.
+ *
+ * Substring rather than the full-text search retrieval uses, and that is the point. Retrieval
+ * answers "what is this about", which is a question about meaning; this answers "where do these
+ * words appear", which is a question about text. Somebody hunting "64-hour" wants the passage
+ * containing those characters, not the passages Postgres thinks are related to it -- and the
+ * stemmer would not have matched that one anyway.
+ *
+ * Titles as well as bodies, because the page somebody wants is often named after the thing.
+ */
+export async function findPassages(
+  workspaceId: number,
+  baseId: number,
+  q: string,
+): Promise<{ hits: Found[]; more: boolean }> {
+  const needle = q.trim()
+  // One character matches half the base and tells nobody anything.
+  if (needle.length < 2) return { hits: [], more: false }
+
+  /*
+   * position() rather than ILIKE, so there is nothing to escape.
+   *
+   * The ILIKE version needed the needle's own % and _ escaped and an ESCAPE clause to do it
+   * with, and got both wrong -- quietly, because Postgres reads ESCAPE '' as "no escape
+   * character" instead of rejecting it, so a search for "50%" matched half the base rather
+   * than failing. position() takes the needle as plain text: no wildcards, nothing to get
+   * right. Unindexed either way; a base is thousands of passages, not millions.
+   */
+  const rows = await all<Found & { text: string }>(
+    `SELECT c.id, c.document_id, c.ord, c.text, d.title, d.uri, d.source, d.edited_at
+       FROM chunks c JOIN documents d ON d.id = c.document_id
+      WHERE c.workspace_id = ? AND d.base_id = ?
+        AND (position(lower(?) in lower(c.text)) > 0 OR position(lower(?) in lower(d.title)) > 0)
+      ORDER BY d.title, c.ord
+      LIMIT ?`,
+    workspaceId,
+    baseId,
+    needle,
+    needle,
+    FOUND_LIMIT + 1,
+  )
+
+  // One over the limit, so the page can say it is showing a page of a longer list rather than
+  // presenting a truncated answer as the whole one.
+  return {
+    hits: rows.slice(0, FOUND_LIMIT).map(({ text, ...row }) => ({ ...row, excerpt: around(text, needle) })),
+    more: rows.length > FOUND_LIMIT,
+  }
+}
+
+/** The hit with enough either side to read, or the opening if the match was in the title. */
+function around(text: string, needle: string) {
+  const at = text.toLowerCase().indexOf(needle.toLowerCase())
+  if (at === -1) return text.slice(0, 220).trim()
+  const from = Math.max(0, at - 90)
+  return (from ? '…' : '') + text.slice(from, at + needle.length + 150).trim() + '…'
+}
+
+
 export const getDocument = (workspaceId: number, id: number) =>
   one<Document & { text: string; base_id: number; site_id: number | null }>(
     `SELECT * FROM documents WHERE workspace_id = ? AND id = ?`,
@@ -350,8 +434,34 @@ export const getDocument = (workspaceId: number, id: number) =>
   )
 
 export async function removeDocument(workspaceId: number, id: number) {
-  // The workspace is in the WHERE as well as in the policy. Belt and braces, and it makes
-  // the intent readable without knowing the policies exist.
+  /*
+   * `uploads.document_id` is `on delete cascade`, and one upload going with its document is
+   * deliberate — `test/uploads.test.js` pins it, so that deleting knowledge does not leave
+   * bytes behind with nothing pointing at them.
+   *
+   * The case that is not deliberate is *two*. Identical text is deduplicated onto one
+   * `documents` row, so two files uploaded under different names share it, and deleting the
+   * document from Knowledge took both — including the one nobody selected and nothing warned
+   * about. `uploads.remove()` has guarded the mirror image of this from the start.
+   *
+   * So the guard is on the plural, not on the existence: one upload still cascades as designed,
+   * two or more refuse and say which. Refusing rather than orphaning, because an upload with no
+   * document behind it is a row the reader cannot open — that trades a silent deletion for a
+   * silent breakage.
+   *
+   * The workspace is in the WHERE as well as in the policy. Belt and braces, and it makes the
+   * intent readable without knowing the policies exist.
+   */
+  const held = await one<{ n: number }>(
+    `SELECT count(*)::int AS n FROM uploads WHERE workspace_id = ? AND document_id = ?`,
+    workspaceId,
+    id,
+  )
+  if (held && held.n > 1)
+    throw new Error(
+      `That text came from ${held.n} different uploads, and deleting it here would delete all ${held.n} files. Remove them from Uploads instead.`,
+    )
+
   const { changes } = await run(`DELETE FROM documents WHERE workspace_id = ? AND id = ?`, workspaceId, id)
   if (!changes) throw new Error('No such document')
 }
@@ -404,7 +514,18 @@ export async function saveText(workspaceId: number, id: number, text: string) {
   if (clash) throw new Error(`"${clash.title}" in this knowledge base already holds exactly this text.`)
 
   const n = await tx(async () => {
-    await run(`UPDATE documents SET text = ?, hash = ?, updated_at = now() WHERE id = ?`, clean, hash, id)
+    /*
+     * `edited_at` as well as `updated_at`, and they are not the same question. `updated_at`
+     * moves whenever anything touches the row, reindex included; this moves only when a person
+     * has changed what the document says. A crawl of the same page clears it again -- see the
+     * UPDATE in store() above.
+     */
+    await run(
+      `UPDATE documents SET text = ?, hash = ?, updated_at = now(), edited_at = now() WHERE id = ?`,
+      clean,
+      hash,
+      id,
+    )
     await run(`DELETE FROM chunks WHERE document_id = ?`, id)
     return writeChunks(workspaceId, id, clean, doc.title)
   })
@@ -468,15 +589,38 @@ export async function removePassage(workspaceId: number, chunkId: number) {
   const doc = await getDocument(workspaceId, chunk.document_id)
   if (!doc) throw new Error('No such document')
 
-  const at = doc.text.indexOf(chunk.text)
+  /*
+   * The stored passage carries the document's title as a heading and the document text does
+   * not — `writeChunks` prefixes every piece so a title is searchable, since retrieval reads
+   * `chunks` and never `documents.title`. Searching for the prefixed form in the unprefixed
+   * source therefore never matched, and *every* attempt to remove a passage failed with the
+   * message below, which says the document changed when nothing had.
+   *
+   * Stripped rather than searched around, and only when it is really the prefix this function
+   * put there: a document that genuinely opens with its own title keeps it, which is the same
+   * case `writeChunks` declines to double up.
+   */
+  const heading = doc.title.trim()
+  const body =
+    heading && chunk.text.startsWith(`${heading}\n\n`) ? chunk.text.slice(heading.length + 2) : chunk.text
+
+  const at = doc.text.indexOf(body)
   /*
    * Not found means the text has moved on since this passage was cut from it — somebody
    * edited the document in another tab. Refusing is the honest answer: cutting the nearest
    * thing would delete something they did not choose.
    */
+  /*
+   * ponytail: a verbatim search, so a passage `chunk()` trimmed at a boundary that does not
+   * fall on a substring of the source still refuses. Before the heading strip above, *every*
+   * passage refused; now it is the minority that start mid-paragraph. Refusing is the safe
+   * direction and the message is honest about the outcome if not the cause — the upgrade path
+   * is to store each chunk's offset in the source when it is written, which makes this an
+   * index lookup rather than a search, and is a migration on `chunks`.
+   */
   if (at === -1) throw new Error('That passage is no longer part of this document — reload and try again.')
 
-  const left = (doc.text.slice(0, at) + doc.text.slice(at + chunk.text.length)).replace(/\n{3,}/g, '\n\n').trim()
+  const left = (doc.text.slice(0, at) + doc.text.slice(at + body.length)).replace(/\n{3,}/g, '\n\n').trim()
   if (!left) throw new Error('That is the whole document — remove the document instead.')
 
   await saveText(workspaceId, chunk.document_id, left)

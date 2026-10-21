@@ -1,11 +1,11 @@
 import { useState } from 'react'
 import { Link, createFileRoute, useRouter } from '@tanstack/react-router'
 import { createServerFn, useServerFn } from '@tanstack/react-start'
-import { DayModal, eventItem } from '../components/DayModal'
+import { DayModal, bySlot, eventItem } from '../components/DayModal'
 import type { DayItem } from '../components/DayModal'
 import { requireSession } from '../server/auth'
 import * as catalogue from '../server/catalogue'
-import { CALENDAR_COLOURS, CALENDAR_VIEWS, calendarRange, shiftCalendar } from '../types'
+import { CALENDAR_COLOURS, CALENDAR_VIEWS, calendarRange, fallsOn, shiftCalendar, todayFor } from '../types'
 import type { CalendarView } from '../types'
 
 /**
@@ -58,7 +58,7 @@ export const Route = createFileRoute('/calendar')({
     view: CALENDAR_VIEWS.includes(q.view as CalendarView) ? (q.view as CalendarView) : undefined,
   }),
   loaderDeps: ({ search }) => ({
-    on: search.on ?? new Date().toISOString().slice(0, 10),
+    on: search.on ?? todayFor(),
     view: search.view ?? 'month',
   }),
   loader: ({ deps }) => load({ data: deps }),
@@ -76,7 +76,7 @@ function Calendars() {
   const router = useRouter()
   const calFn = useServerFn(saveCalendar)
 
-  const on = search.on ?? new Date().toISOString().slice(0, 10)
+  const on = search.on ?? todayFor()
   const view = search.view ?? 'month'
   const go = (next: Partial<{ on: string; view: CalendarView }>) =>
     navigate({ search: { on, view, ...next }, replace: true })
@@ -132,18 +132,7 @@ function Calendars() {
       const source = `cal:${e.calendar_id}`
       if (!shownSource(source)) continue
       const cal = d.calendars.find((c) => c.id === e.calendar_id)
-      const start = e.starts_on
-      const end = e.ends_on || e.starts_on
-      let hit = key >= start && key <= end
-      if (!hit && e.repeats !== 'once' && key >= start) {
-        const day = new Date(`${key}T00:00:00Z`)
-        const first = new Date(`${start}T00:00:00Z`)
-        hit =
-          (e.repeats === 'yearly' && key.slice(5) === start.slice(5)) ||
-          (e.repeats === 'monthly' && key.slice(8) === start.slice(8)) ||
-          (e.repeats === 'weekly' && day.getUTCDay() === first.getUTCDay())
-      }
-      if (!hit) continue
+      if (!fallsOn(e, key)) continue
       if (term && !`${e.title} ${e.detail}`.toLowerCase().includes(term)) continue
       out.push(eventItem(e, cal?.name ?? 'A calendar', cal?.colour ?? 'moss'))
     }
@@ -215,6 +204,7 @@ function Calendars() {
             </div>
             <span className="grow" />
             <input
+              className="search"
               placeholder="Search dates"
               value={q}
               onChange={(e) => setQ(e.target.value)}
@@ -273,10 +263,23 @@ function Calendars() {
                 onClick={() => setDay(key)}
               >
                 <span className="calnum">{Number(key.slice(8))}</span>
-                {dayOf(key).map((x) => (
-                  <span key={x.key} className={`calentry ${x.colour}`} title={x.detail || x.title}>
-                    {x.time && <small>{x.time}</small>}
-                    <b>{x.title}</b>
+                {/*
+                  One line per slot, not one per row.
+                  
+                  Six wordings of one intake, each spanning a fortnight, painted ninety chips
+                  across September and buried everything else. They are only folded, never
+                  merged: two courses really can run the same days at the same hours, so the
+                  count opens the day and every title is there to read.
+                */}
+                {bySlot(dayOf(key)).map(({ leader, also }) => (
+                  <span key={leader.key} className={`calentry ${leader.colour}`} title={
+                    also.length
+                      ? [leader.title, ...also.map((a) => a.title)].join(String.fromCharCode(10))
+                      : leader.detail || leader.title
+                  }>
+                    {leader.time && <small>{leader.time}</small>}
+                    <b>{leader.title}</b>
+                    {also.length > 0 && <em className="calmore">+{also.length}</em>}
                   </span>
                 ))}
               </button>

@@ -34,8 +34,10 @@ export type Bot = {
   label: string
   /** The @handle, which is how a person finds this bot. Null for bots connected before it was kept. */
   username: string | null
-  /** Telegram sender ids allowed to talk to this bot. Empty means nobody. */
+  /** Telegram sender ids allowed to talk to this bot. Empty means nobody, unless `open`. */
   allowed: string[]
+  /** Answer whoever writes in, rather than only the listed senders. See `accept()`. */
+  open: boolean
   /** Senders turned away recently, so the allow list can be filled in with one click. */
   pending: Pending[]
   /** 'webhook' when Telegram pushes to us, 'polling' when we fetch. See register(). */
@@ -88,14 +90,14 @@ async function telegram<T>(token: string, method: string, body?: object): Promis
 
 export const list = (workspaceId: number) =>
   all<Bot>(
-    `SELECT id, label, username, allowed, pending, mode, last_error, created_at FROM telegram_bots
+    `SELECT id, label, username, allowed, open, pending, mode, last_error, created_at FROM telegram_bots
       WHERE workspace_id = ? ORDER BY created_at`,
     workspaceId,
   )
 
 export const get = (workspaceId: number, botId: string) =>
   one<Bot>(
-    `SELECT id, label, username, allowed, pending, mode, last_error, created_at FROM telegram_bots
+    `SELECT id, label, username, allowed, open, pending, mode, last_error, created_at FROM telegram_bots
       WHERE workspace_id = ? AND id = ?`,
     workspaceId,
     botId,
@@ -262,6 +264,19 @@ export async function revoke(workspaceId: number, botId: string, sender: string)
   return (await get(workspaceId, botId))!
 }
 
+/**
+ * Answer everyone, or only the listed senders.
+ *
+ * The allow list is kept either way rather than cleared, so closing the bot again restores
+ * the people who were let in by hand instead of asking for them a second time. While open it
+ * simply does not decide anything.
+ */
+export async function setOpen(workspaceId: number, botId: string, open: boolean) {
+  const done = await run(`UPDATE telegram_bots SET open = ? WHERE workspace_id = ? AND id = ?`, open, workspaceId, botId)
+  if (!done.changes) throw new Error('No such bot')
+  return (await get(workspaceId, botId))!
+}
+
 // ---------------------------------------------------------------- inbound
 
 export type Parsed = {
@@ -362,6 +377,8 @@ async function download(token: string, file: NonNullable<Parsed['file']>): Promi
 
 export type Handled =
   | { status: 'ignored'; reason: string }
+  /** Over the limit. Not a refusal — the route answers 429 so Telegram redelivers. */
+  | { status: 'deferred'; retryAfterMs: number }
   | { status: 'refused'; sender: string }
   | { status: 'handled'; conversationId: number }
 
@@ -419,7 +436,13 @@ async function accept(row: Row, update: unknown): Promise<Handled> {
   const botId = row.id
 
   const wait = await take(`telegram:${botId}`, WEBHOOK)
-  if (wait) return { status: 'ignored', reason: 'rate limited' }
+  /*
+   * Deferred, not dropped. `ignored` plus the route's 200 told Telegram the update was taken,
+   * and Telegram does not send an update twice — so every message past the limit was lost
+   * silently. For an open bot the limit is per bot rather than per sender, so one noisy sender
+   * could take every other customer's messages with them.
+   */
+  if (wait) return { status: 'deferred', retryAfterMs: wait }
 
   const parsed = parse(update)
   if (!parsed) return { status: 'ignored', reason: 'not a text message' }
@@ -430,8 +453,13 @@ async function accept(row: Row, update: unknown): Promise<Handled> {
    * A bot's username is discoverable and anyone can message it. Open by default would mean
    * the first stranger to find it gets to spend the workspace's model budget and read
    * whatever the knowledge base knows.
+   *
+   * Which is exactly what a public support bot is for, so `open` turns the gate off. The
+   * rate limit above is not part of this decision and still applies: it is per bot, so an
+   * open one is throttled as a whole rather than per sender, and a crowd cannot spend the
+   * budget faster than one person could.
    */
-  if (!row.allowed.includes(parsed.senderId)) {
+  if (!row.open && !row.allowed.includes(parsed.senderId)) {
     await remember(row, parsed)
     return { status: 'refused', sender: parsed.senderId }
   }
@@ -490,15 +518,23 @@ export async function send(conversation: Conversation, text: string, files: Send
   const token = openOrNull(row.token_enc)
   if (!token) throw new Error('That bot token cannot be read — check SECRET_KEY')
 
-  const sent = await telegram<{ message_id: number }>(token, 'sendMessage', { chat_id: chatId, text })
+  // Only when there is something to say. Telegram refuses an empty `text` outright, and a
+  // file sent on its own should arrive on its own rather than under a message repeating the
+  // name the attachment already shows.
+  const sent = text ? await telegram<{ message_id: number }>(token, 'sendMessage', { chat_id: chatId, text }) : null
 
   /*
    * The text first, then a send per file.
    *
-   * The returned id stays the text message's: that is what the redelivery guard matches on.
+   * The returned id is the text message's where there is one, and the first file's where
+   * there is not: it is what the redelivery guard matches on, and `deliver()` stamps it as
+   * `external_id`, whose absence the inbox shows as "not delivered". A files-only send is
+   * delivered, so it has to come back with something.
+   *
    * Each upload is caught on its own — the answer is the message and the file is an
    * enclosure, so losing the enclosure and keeping the answer beats losing both.
    */
+  let id: number | null = sent?.message_id ?? null
   for (const f of files) {
     try {
       const held = await byToken(f.token)
@@ -509,13 +545,16 @@ export async function send(conversation: Conversation, text: string, files: Send
       form.set('chat_id', chatId)
       // An image goes as a photo so it previews in the chat; everything else keeps its name.
       form.set(image ? 'photo' : 'document', new Blob([new Uint8Array(held.bytes)], { type: mime }), f.title)
-      await upload(token, image ? 'sendPhoto' : 'sendDocument', form)
+      const up = await upload<{ message_id: number }>(token, image ? 'sendPhoto' : 'sendDocument', form)
+      id ??= up.message_id
     } catch (e) {
       console.error('[telegram] could not send', f.title, e instanceof Error ? e.message : e)
     }
   }
 
-  return `telegram:${chatId}:${sent.message_id}`
+  // Null only when there was no text and every upload failed, which the caller reports as
+  // undelivered rather than quietly filing as sent.
+  return id == null ? null : `telegram:${chatId}:${id}`
 }
 
 // ---------------------------------------------------------------- long polling

@@ -21,3 +21,4 @@ uploads
 .tmp.driveupload
 .tmp.drivedownload
 certs
+.media

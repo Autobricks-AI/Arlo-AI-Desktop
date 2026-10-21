@@ -1,0 +1,30 @@
+-- A crawled page somebody has corrected by hand, and no crawl has overwritten since.
+--
+-- ---------------------------------------------------------------- what prompted it
+--
+-- A bot offered a course the company no longer runs. The source was their own website, crawled
+-- faithfully: the page still advertises it. Normally the answer is to fix the page and crawl
+-- again, but this site belongs to somebody who will never update it, so the only way to correct
+-- the knowledge base is to edit the crawled text here and not crawl that domain again.
+--
+-- That works -- saveText() rewrites the document, re-chunks and re-embeds it -- and it is one
+-- click away from being undone. "Crawl again" sits in the same row as the pages it would replace
+-- and asks nothing before overwriting them from the live site. This column is what lets the page
+-- say so, both standing and at the moment somebody reaches for that button.
+--
+-- ---------------------------------------------------------------- why a column, not a comparison
+--
+-- The obvious detector needs no migration at all: documents.updated_at > sites.finished_at. It is
+-- wrong. reindex() bumps updated_at without changing a word of the text, so every page in a base
+-- reads as hand-edited the moment anybody reindexes -- and a warning that fires on nothing is the
+-- warning people learn to click through. This one has to survive being seen often.
+--
+-- So the column records the one fact being asked about: a person changed this text, and no crawl
+-- has replaced it since. Set by saveText (which removePassage also goes through, so both editing
+-- paths are covered in one place), cleared by store() when a crawl overwrites the document, and
+-- deliberately untouched by reindex -- re-chunking the same text leaves the edit standing, so it
+-- must leave the flag standing too.
+--
+-- Nullable, no index, no backfill. NULL means "as it was crawled", which is true of every row
+-- that exists today. The only readers are one count per site on a page somebody has open.
+alter table documents add column if not exists edited_at timestamptz;

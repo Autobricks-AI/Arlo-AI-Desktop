@@ -209,16 +209,43 @@ export async function deliver(
  * including on a closed thread, where answering is what reopens it. Handing it back to
  * Arlo is one button, and it is the only way back.
  */
-export async function replyAsPerson(workspaceId: number, conversationId: number, text: string, author: string) {
+export async function replyAsPerson(
+  workspaceId: number,
+  conversationId: number,
+  text: string,
+  author: string,
+  files: Sendable[] = [],
+) {
+  /*
+   * A file sent with nothing typed goes on its own.
+   *
+   * It used to be captioned with its own filename, because the socket channels put a text
+   * message out before the attachment and an empty one is a refused send. But that caption
+   * arrives as a *second* message sitting above a document that already shows its name, so
+   * the recipient reads the filename twice and nobody wrote either of them. The channels
+   * skip the text send instead when there is nothing to say -- see telegram.ts and
+   * whatsapp.ts, which then report the file's own id so the send still counts as delivered.
+   */
   const body = text.trim()
-  if (!body) throw new Error('Nothing to send')
+  if (!body && !files.length) throw new Error('Nothing to send')
 
   const conversation = await get(workspaceId, conversationId)
   if (!conversation) throw new Error('No such conversation')
 
   if (conversation.status !== 'human') await setStatus(workspaceId, conversationId, 'human', author)
 
-  const result = await deliver(workspaceId, conversation, body, { author })
+  /*
+   * `speaker` said outright, not left to be guessed from the author string.
+   *
+   * `deliver()` falls back to `author === BOT_AUTHOR ? 'bot' : 'team'`, and BOT_AUTHOR is
+   * 'arlo' — which is also DEFAULT_USER, the account every fresh install signs in as. So on
+   * a default install every word a person typed was filed as the bot's own, and the learning
+   * extractor, whose first rule is that a fact may only come from the team, could never see
+   * anything to learn: `harvest()` returned 0 before it spent a single call.
+   *
+   * This function is the person's path by definition. It knows, so it says.
+   */
+  const result = await deliver(workspaceId, conversation, body, { author, speaker: 'team', files })
   // deliver() records before it sends, so a failure here means "it is in the thread but
   // did not go out" — which the person who typed it has to be told.
   if (!result.ok) throw new Error(result.error ?? 'That did not send')

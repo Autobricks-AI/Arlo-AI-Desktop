@@ -71,9 +71,17 @@ function components(raw: string, dict: string): number {
   if (/DeviceCMYK/.test(space)) return 4
   if (/DeviceGray|CalGray/.test(space)) return 1
   if (/DeviceRGB|CalRGB/.test(space)) return 3
-  // ICCBased carries the count in /N, which is the whole reason it needs resolving.
+  /*
+   * ICCBased carries the count in /N, which is the whole reason it needs resolving — and it
+   * comes out of the file, so it is attacker-controlled. It feeds the zlib output bound below
+   * as `(width * comps + 1) * height`, and MAX_PIXELS caps only the other two factors: an
+   * `/N 999999999` made that bound about 10^14, which is no bound at all, and the inflate ran
+   * until the process died. Four is the largest colour space this reader knows how to turn
+   * into a PNG, so anything above it is already unusable and can be clamped rather than
+   * trusted — `toPng` rejects the value afterwards either way, but only after inflating.
+   */
   const n = num(space, 'N')
-  return n || 3
+  return n >= 1 && n <= 4 ? n : 3
 }
 
 // ---------------------------------------------------------------- PNG

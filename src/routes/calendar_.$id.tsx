@@ -5,7 +5,8 @@ import { DayModal, eventItem } from '../components/DayModal'
 import { NotFound } from '../components/NotFound'
 import { requireSession } from '../server/auth'
 import * as catalogue from '../server/catalogue'
-import { calendarRange, shiftCalendar } from '../types'
+import { calendarRange, fallsOn, shiftCalendar, todayFor } from '../types'
+import { DateForm, asDays, emptyDate, ready } from '../components/DateForm'
 
 /**
  * One calendar: its month, everything on it, and what has been done to it.
@@ -26,6 +27,8 @@ const load = createServerFn({ method: 'GET' })
       calendar,
       events: await catalogue.events(s.workspaceId, data.id),
       history: await catalogue.history(s.workspaceId, data.id),
+      // Offered on the title field, so a new intake joins a course instead of renaming it.
+      courses: await catalogue.coursesOn(s.workspaceId, data.id),
     }
   })
 
@@ -53,11 +56,38 @@ const addDate = createServerFn({ method: 'POST' })
     await catalogue.addEvent(s.workspaceId, data as never)
   })
 
+/**
+ * Several separate days, as one thing.
+ *
+ * Its own function rather than a flag on `addDate`, because what it writes is a course: N rows
+ * that know they belong together. Everything that decides anything -- the cap, the day format,
+ * the token they share -- is in `setDays`, since the validator here is a pass-through and the
+ * browser is the thing being validated.
+ */
+const addDays = createServerFn({ method: 'POST' })
+  .validator(
+    (d: {
+      title: string
+      detail?: string
+      /** A plain day at the shared hours, or one that keeps its own. */
+      days: (string | { on: string; start_time?: string | null; end_time?: string | null })[]
+      start_time?: string
+      end_time?: string
+      repeats?: string
+      until?: string | null
+      calendar_id: number
+    }) => d,
+  )
+  .handler(async ({ data }) => {
+    const s = await requireSession()
+    await catalogue.setDays(s.workspaceId, { ...data, actor: s.email })
+  })
+
 export const Route = createFileRoute('/calendar_/$id')({
   validateSearch: (q: Record<string, unknown>): { on?: string } => ({
     on: typeof q.on === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(q.on) ? q.on : undefined,
   }),
-  loaderDeps: ({ search }) => ({ on: search.on ?? new Date().toISOString().slice(0, 10) }),
+  loaderDeps: ({ search }) => ({ on: search.on ?? todayFor() }),
   loader: ({ params, deps }) => load({ data: { id: Number(params.id), on: deps.on } }),
   component: OneCalendar,
 })
@@ -92,8 +122,9 @@ function CalendarView({ d }: { d: NonNullable<Awaited<ReturnType<typeof load>>> 
   const router = useRouter()
   const editFn = useServerFn(edit)
   const addFn = useServerFn(addDate)
+  const addDaysFn = useServerFn(addDays)
 
-  const on = search.on ?? new Date().toISOString().slice(0, 10)
+  const on = search.on ?? todayFor()
   /*
    * The month, not the list.
    *
@@ -122,17 +153,16 @@ function CalendarView({ d }: { d: NonNullable<Awaited<ReturnType<typeof load>>> 
   }
 
   const { keys } = calendarRange(on, 'month')
-  const dayOf = (key: string) =>
-    d.events.filter((e) => {
-      const start = e.starts_on
-      const end = e.ends_on || e.starts_on
-      if (key >= start && key <= end) return true
-      if (e.repeats === 'once' || key < start) return false
-      const day = new Date(`${key}T00:00:00Z`)
-      if (e.repeats === 'yearly') return key.slice(5) === start.slice(5)
-      if (e.repeats === 'monthly') return key.slice(8) === start.slice(8)
-      return day.getUTCDay() === new Date(`${start}T00:00:00Z`).getUTCDay()
-    })
+  /*
+   * `fallsOn`, not a copy of it.
+   *
+   * What stood here was a re-implementation that treated the two date columns the same way
+   * whatever the repeat: it returned true for every key between `starts_on` and `ends_on`
+   * before it looked at `repeats` at all. So a weekly class running 3 to 17 April was drawn on
+   * all fifteen days instead of its three Saturdays -- the exact failure the shared helper's own
+   * comment is about, fixed on the merged calendar and left standing here.
+   */
+  const dayOf = (key: string) => d.events.filter((e) => fallsOn(e, key))
 
   return (
     <>
@@ -201,8 +231,14 @@ function CalendarView({ d }: { d: NonNullable<Awaited<ReturnType<typeof load>>> 
       {adding && (
         <NewDate
           busy={busy}
-          onAdd={(v) =>
+          courses={d.courses}
+          onAddSpan={(v) =>
             void act('event', () => addFn({ data: { ...v, calendar_id: d.calendar.id } })).then(() =>
+              setAdding(false),
+            )
+          }
+          onAddDays={(v) =>
+            void act('event', () => addDaysFn({ data: { ...v, calendar_id: d.calendar.id } })).then(() =>
               setAdding(false),
             )
           }
@@ -334,73 +370,47 @@ function CalendarView({ d }: { d: NonNullable<Awaited<ReturnType<typeof load>>> 
 }
 
 /**
- * A new date on this calendar.
+ * Adding to a calendar, through the same form the edit sheet uses.
  *
- * No "which calendar?" picker, unlike the version this replaces on the merged page: the
- * page is the answer. That was the whole reason to move it — a picker with no sensible
- * default is a question asked of somebody who has already answered it.
+ * Everything about when a thing happens lives in `DateForm`, so the two screens cannot drift
+ * apart -- which they had already begun to, the add form having gained a day picker and a
+ * backwards-range check that the edit sheet never got.
  */
-function NewDate({ busy, onAdd }: { busy: string; onAdd: (v: Record<string, unknown>) => void }) {
-  const [v, setV] = useState({
-    title: '',
-    detail: '',
-    starts_on: new Date().toISOString().slice(0, 10),
-    ends_on: '',
-    start_time: '09:00',
-    end_time: '',
-    repeats: 'once',
-  })
+function NewDate({
+  busy,
+  courses,
+  onAddDays,
+  onAddSpan,
+}: {
+  busy: string
+  courses: { title: string; dates: number }[]
+  onAddDays: (v: ReturnType<typeof asDays>) => void
+  onAddSpan: (v: Record<string, unknown>) => void
+}) {
+  const [v, setV] = useState(emptyDate)
 
   return (
     <div className="card" style={{ margin: '10px 0' }}>
-      <div className="fields">
-        <div>
-          <label htmlFor="d-title">What happens</label>
-          <input id="d-title" value={v.title} onChange={(e) => setV({ ...v, title: e.target.value })} />
-        </div>
-        <div>
-          <label htmlFor="d-from">From</label>
-          <input id="d-from" type="date" value={v.starts_on} onChange={(e) => setV({ ...v, starts_on: e.target.value })} />
-        </div>
-        <div>
-          <label htmlFor="d-to">To</label>
-          <input id="d-to" type="date" value={v.ends_on} onChange={(e) => setV({ ...v, ends_on: e.target.value })} />
-          <p className="note" style={{ margin: '4px 0 0' }}>
-            Only for something spanning days.
-          </p>
-        </div>
-        <div>
-          <label htmlFor="d-start">Starts at</label>
-          <input id="d-start" type="time" value={v.start_time} onChange={(e) => setV({ ...v, start_time: e.target.value })} />
-        </div>
-        <div>
-          <label htmlFor="d-end">Ends at</label>
-          <input id="d-end" type="time" value={v.end_time} onChange={(e) => setV({ ...v, end_time: e.target.value })} />
-          <p className="note" style={{ margin: '4px 0 0' }}>
-            An hour after the start if you leave it.
-          </p>
-        </div>
-        <div>
-          <label htmlFor="d-rep">Repeats</label>
-          <select id="d-rep" value={v.repeats} onChange={(e) => setV({ ...v, repeats: e.target.value })}>
-            <option value="once">Once</option>
-            <option value="weekly">Every week</option>
-            <option value="monthly">Every month</option>
-            <option value="yearly">Every year</option>
-          </select>
-        </div>
-      </div>
-      <label htmlFor="d-detail" style={{ marginTop: 12 }}>
-        Anything else the bot should say about it
-      </label>
-      <input id="d-detail" value={v.detail} onChange={(e) => setV({ ...v, detail: e.target.value })} />
-      <div className="row" style={{ marginTop: 12 }}>
+      <DateForm value={v} onChange={setV} courses={courses} disabled={!!busy} />
+      <div className="row" style={{ marginTop: 14 }}>
         <button
           className="small"
-          disabled={!v.title.trim() || !v.starts_on || !!busy}
-          onClick={() => onAdd({ ...v, ends_on: v.ends_on || null })}
+          disabled={!ready(v, busy)}
+          onClick={() =>
+            v.mode === 'days'
+              ? onAddDays(asDays(v))
+              : onAddSpan({
+                  title: v.title.trim(),
+                  detail: v.detail,
+                  starts_on: v.starts_on,
+                  ends_on: v.ends_on || null,
+                  start_time: v.start_time,
+                  end_time: v.end_time,
+                  repeats: v.repeats,
+                })
+          }
         >
-          {busy === 'event' ? 'Adding…' : 'Add'}
+          {busy === 'event' ? 'Adding…' : v.mode === 'days' && v.days.length > 1 ? `Add ${v.days.length} dates` : 'Add'}
         </button>
       </div>
     </div>
